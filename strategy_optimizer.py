@@ -199,70 +199,71 @@ class StrategyOptimizer:
         return adjusted_weights
     
     def _analyze_strategy_performance(self, days: int = 7) -> Dict[str, Dict]:
-        """
-        Analyze recent performance of each strategy
-        """
-        try:
-            trades_df = self.database.get_historical_trades(days=days)
-            
-            if trades_df.empty:
-                return {}
-            
-            strategy_performance = {}
-            
-            # Group trades by inferred strategy (simplified)
-            for strategy in ['trend_following', 'mean_reversion', 'breakout', 'ml_prediction']:
-                strategy_trades = self._filter_trades_by_strategy(trades_df, strategy)
+            """
+            Analyze recent performance attributed to each strategy based on stored scores.
+            """
+            try:
+                trades_df = self.database.get_historical_trades(days=days)
                 
-                if len(strategy_trades) > 0:
-                    performance = {
-                        'trade_count': len(strategy_trades),
-                        'win_rate': (strategy_trades['pnl_percent'] > 0).mean() * 100,
-                        'avg_pnl': strategy_trades['pnl_percent'].mean(),
-                        'total_pnl': strategy_trades['pnl_percent'].sum(),
-                        'success_rate': strategy_trades['success'].mean() * 100
-                    }
-                    strategy_performance[strategy] = performance
-            
-            return strategy_performance
-            
-        except Exception as e:
-            self.logger.error(f"Failed to analyze strategy performance: {e}")
-            return {}
-    
-    def _filter_trades_by_strategy(self, trades_df: pd.DataFrame, strategy: str) -> pd.DataFrame:
-        """
-        Filter trades by strategy type (simplified heuristic)
-        """
-        if trades_df.empty:
-            return pd.DataFrame()
-        
-        # Simplified strategy identification based on trade characteristics
-        if strategy == 'trend_following':
-            # Trades with high composite score and strong trend signals
-            return trades_df[
-                (trades_df['composite_score'] > 20) & 
-                (trades_df['confidence'] > 60)
-            ]
-        elif strategy == 'mean_reversion':
-            # Trades with moderate scores and mean reversion characteristics
-            return trades_df[
-                (trades_df['composite_score'].between(10, 30)) &
-                (trades_df['confidence'] > 40)
-            ]
-        elif strategy == 'breakout':
-            # Trades with high volatility and breakout characteristics
-            return trades_df[
-                (trades_df['composite_score'] > 15) &
-                (trades_df['risk_reward_ratio'] > 2.0)
-            ]
-        elif strategy == 'ml_prediction':
-            # Trades where ML confidence was high
-            return trades_df[
-                trades_df['confidence'] > 50  # Simplified proxy for ML influence
-            ]
-        else:
-            return pd.DataFrame()
+                if trades_df.empty or 'pnl_percent' not in trades_df.columns:
+                    self.logger.warning("No recent trades with PnL found for performance analysis.")
+                    return {}
+
+                # Ensure score columns exist and handle potential NaN from DB read
+                score_cols = ['trend_score', 'mr_score', 'breakout_score', 'ml_score', 'mtf_score']
+                for col in score_cols:
+                    if col not in trades_df.columns:
+                        trades_df[col] = 0 # Add column if missing
+                trades_df[score_cols] = trades_df[score_cols].fillna(0)
+
+                # Filter for trades with PnL data
+                valid_trades = trades_df.dropna(subset=['pnl_percent'])
+                if valid_trades.empty:
+                    self.logger.warning("No trades with valid PnL found.")
+                    return {}
+
+                strategy_performance = {}
+                strategies = { # Map DB column names to strategy names used elsewhere
+                    'trend_score': 'trend_following',
+                    'mr_score': 'mean_reversion',
+                    'breakout_score': 'breakout',
+                    'ml_score': 'ml_prediction',
+                    # 'mtf_score': 'mtf' # Can add if needed, but wasn't in original weights
+                }
+
+                # --- Method 1: Attribute PnL based on the highest absolute score ---
+                # Determine the dominant strategy for each trade
+                abs_scores = valid_trades[[col for col in score_cols if col in strategies]].abs()
+                valid_trades['dominant_strategy_col'] = abs_scores.idxmax(axis=1)
+                valid_trades['dominant_strategy'] = valid_trades['dominant_strategy_col'].map(strategies)
+
+                for strategy_col, strategy_name in strategies.items():
+                    # Select trades where this strategy was dominant
+                    strategy_trades = valid_trades[valid_trades['dominant_strategy'] == strategy_name]
+                    
+                    if not strategy_trades.empty:
+                        winning_trades = strategy_trades[strategy_trades['pnl_percent'] > 0]
+                        performance = {
+                            'trade_count': len(strategy_trades),
+                            'win_rate': (len(winning_trades) / len(strategy_trades)) * 100 if len(strategy_trades) > 0 else 0,
+                            'avg_pnl': strategy_trades['pnl_percent'].mean(),
+                            'total_pnl': strategy_trades['pnl_percent'].sum(),
+                            'success_rate': strategy_trades['success'].mean() * 100 # Assuming 'success' column reflects execution success
+                        }
+                        strategy_performance[strategy_name] = performance
+                    else:
+                        # Initialize with zero if no trades dominated by this strategy
+                        strategy_performance[strategy_name] = {
+                            'trade_count': 0, 'win_rate': 0, 'avg_pnl': 0, 
+                            'total_pnl': 0, 'success_rate': 0
+                        }
+
+                self.logger.info(f"Analyzed performance attribution: {strategy_performance}")
+                return strategy_performance
+                
+            except Exception as e:
+                self.logger.error(f"Failed to analyze strategy performance: {e}")
+                return {} # Return empty dict on error
     
     def _calculate_performance_factor(self, performance: Dict) -> float:
         """

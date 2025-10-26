@@ -52,6 +52,11 @@ class TradingDatabase:
                     order_id TEXT,
                     success BOOLEAN NOT NULL,
                     error_message TEXT,
+                    trend_score REAL DEFAULT 0,      -- Added
+                    mr_score REAL DEFAULT 0,         -- Added
+                    breakout_score REAL DEFAULT 0,   -- Added
+                    ml_score REAL DEFAULT 0,         -- Added
+                    mtf_score REAL DEFAULT 0,        -- Added
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -211,55 +216,58 @@ class TradingDatabase:
             raise
     
     def store_trade(self, trade_data: Dict[str, Any]) -> bool:
-        """
-        Store a trade record in the database
-        
-        Args:
-            trade_data: Dictionary containing trade information
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            cursor = self.connection.cursor()
-            
-            cursor.execute('''
-                INSERT INTO trades (
-                    timestamp, symbol, action, quantity, entry_price, exit_price,
-                    position_size_usdt, stop_loss, take_profit, exit_reason,
-                    pnl_usdt, pnl_percent, confidence, composite_score,
-                    risk_reward_ratio, aggressiveness, order_id, success, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                trade_data.get('timestamp', datetime.now()),
-                trade_data.get('symbol'),
-                trade_data.get('action'),
-                trade_data.get('quantity', 0),
-                trade_data.get('entry_price', 0),
-                trade_data.get('exit_price'),
-                trade_data.get('position_size_usdt', 0),
-                trade_data.get('stop_loss', 0),
-                trade_data.get('take_profit', 0),
-                trade_data.get('exit_reason'),
-                trade_data.get('pnl_usdt'),
-                trade_data.get('pnl_percent'),
-                trade_data.get('confidence', 0),
-                trade_data.get('composite_score', 0),
-                trade_data.get('risk_reward_ratio', 0),
-                trade_data.get('aggressiveness', 'moderate'),
-                trade_data.get('order_id'),
-                trade_data.get('success', False),
-                trade_data.get('error_message')
-            ))
-            
-            self.connection.commit()
-            trade_id = cursor.lastrowid
-            self.logger.info(f"Stored trade #{trade_id} for {trade_data.get('symbol')}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to store trade: {e}")
-            return False
+            """
+            Store a trade record in the database including individual strategy scores
+            """
+            try:
+                cursor = self.connection.cursor()
+                
+                # Prepare data tuple, including new scores with defaults
+                data_tuple = (
+                    trade_data.get('timestamp', datetime.now()),
+                    trade_data.get('symbol'),
+                    trade_data.get('action'),
+                    trade_data.get('quantity', 0),
+                    trade_data.get('entry_price', 0),
+                    trade_data.get('exit_price'),
+                    trade_data.get('position_size_usdt', 0),
+                    trade_data.get('stop_loss', 0),
+                    trade_data.get('take_profit', 0),
+                    trade_data.get('exit_reason'),
+                    trade_data.get('pnl_usdt'),
+                    trade_data.get('pnl_percent'),
+                    trade_data.get('confidence', 0),
+                    trade_data.get('composite_score', 0),
+                    trade_data.get('risk_reward_ratio', 0),
+                    trade_data.get('aggressiveness', 'moderate'),
+                    trade_data.get('order_id'),
+                    trade_data.get('success', False),
+                    trade_data.get('error_message'),
+                    trade_data.get('trend_score', 0),      # Added
+                    trade_data.get('mr_score', 0),         # Added
+                    trade_data.get('breakout_score', 0),   # Added
+                    trade_data.get('ml_score', 0),         # Added
+                    trade_data.get('mtf_score', 0)         # Added
+                )
+
+                cursor.execute('''
+                    INSERT INTO trades (
+                        timestamp, symbol, action, quantity, entry_price, exit_price,
+                        position_size_usdt, stop_loss, take_profit, exit_reason,
+                        pnl_usdt, pnl_percent, confidence, composite_score,
+                        risk_reward_ratio, aggressiveness, order_id, success, error_message,
+                        trend_score, mr_score, breakout_score, ml_score, mtf_score -- Added columns
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) -- Added placeholders
+                ''', data_tuple)
+                
+                self.connection.commit()
+                trade_id = cursor.lastrowid
+                self.logger.info(f"Stored trade #{trade_id} for {trade_data.get('symbol')} with strategy scores")
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"Failed to store trade: {e} | Data: {trade_data}") # Log data on failure
+                return False
     
     def update_trade_exit(self, trade_id: int, exit_price: float, 
                          pnl_usdt: float, pnl_percent: float, exit_reason: str) -> bool:
