@@ -145,6 +145,8 @@ class TradingDatabase:
                     model_used TEXT,
                     features_used TEXT,
                     ensemble_used BOOLEAN DEFAULT FALSE,
+                    feature_count INTEGER DEFAULT 0,
+                    raw_prediction INTEGER DEFAULT 0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -447,7 +449,8 @@ class TradingDatabase:
     
     def store_prediction_quality(self, symbol: str, prediction: int, actual: int = None, 
                                confidence: float = 0, model_used: str = None, 
-                               features_used: List[str] = None, ensemble_used: bool = False) -> bool:
+                               features_used: List[str] = None, ensemble_used: bool = False,
+                               feature_count: int = 0, raw_prediction: int = 0) -> bool:
         """
         Store individual prediction quality record
         
@@ -472,8 +475,8 @@ class TradingDatabase:
             
             cursor.execute('''
                 INSERT INTO prediction_quality 
-                (symbol, prediction, actual, confidence, correct, timestamp, model_used, features_used, ensemble_used)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (symbol, prediction, actual, confidence, correct, timestamp, model_used, features_used, ensemble_used, feature_count, raw_prediction)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 symbol,
                 prediction,
@@ -483,7 +486,9 @@ class TradingDatabase:
                 datetime.now(),
                 model_used,
                 json.dumps(features_used) if features_used else None,
-                ensemble_used
+                ensemble_used,
+                feature_count,
+                raw_prediction
             ))
             
             self.connection.commit()
