@@ -1,16 +1,18 @@
 from enhanced_technical_analyzer import EnhancedTechnicalAnalyzer
 from ml_predictor import MLPredictor
 from advanced_risk_manager import AdvancedRiskManager
+from data_engine import DataEngine
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
 from scipy.optimize import minimize
 
 class EnhancedStrategyOrchestrator:
-    def __init__(self, bybit_client, aggressiveness: str = "conservative", error_handler=None, database=None):
-        self.technical_analyzer = EnhancedTechnicalAnalyzer()
+    def __init__(self, bybit_client, data_engine: DataEngine, aggressiveness: str = "conservative", error_handler=None, database=None):
         self.ml_predictor = MLPredictor(error_handler, database)
         self.risk_manager = AdvancedRiskManager(bybit_client, aggressiveness)
+        self.client = bybit_client # Store client if needed elsewhere
+        self.data_engine = data_engine # <-- Store data_engine instance
         self.aggressiveness = aggressiveness
         self.error_handler = error_handler
         self.database = database
@@ -533,145 +535,164 @@ class EnhancedStrategyOrchestrator:
             return 0.5
     
     def analyze_symbol(self, symbol: str, historical_data: pd.DataFrame, portfolio_value: float) -> Dict:
-        try:
-            return self.analyze_symbol_aggressive(symbol, historical_data, portfolio_value, self.aggressiveness)
-        except Exception as e:
-            error_msg = f"Error analyzing symbol {symbol}: {e}"
-            print(f"❌ {error_msg}")
-            
-            if self.error_handler:
-                self.error_handler.handle_trading_error(e, symbol, "analysis")
-            
-            return {
-                'symbol': symbol,
-                'current_price': historical_data['close'].iloc[-1] if not historical_data.empty else 0,
-                'action': 'HOLD',
-                'confidence': 0,
-                'composite_score': 0,
-                'position_size': 0,
-                'quantity': 0,
-                'stop_loss': 0,
-                'take_profit': 0,
-                'risk_reward_ratio': 0,
-                'signals': {},
-                'ml_prediction': {'prediction': 0, 'confidence': 0},
-                'market_regime': 'neutral',
-                'volatility_regime': 'normal',
-                'aggressiveness': self.aggressiveness,
-                'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
-                'market_context': {},
-                'timestamp': pd.Timestamp.now(),
-                'analysis_error': str(e)
-            }
-    
-    def analyze_symbol_aggressive(self, symbol: str, historical_data: pd.DataFrame, 
-                                    portfolio_value: float, aggressiveness: str = None) -> Dict:
-            
-            if aggressiveness is None:
-                aggressiveness = self.aggressiveness
-                
+            """Analyzes a symbol using the appropriate aggressiveness level."""
+            # This method now primarily delegates, ensuring aggressiveness is passed
             try:
-                if historical_data is None or len(historical_data) < 100:
-                    raise ValueError(f"Insufficient historical data for {symbol}")
-                
-                indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
-                signals = self.technical_analyzer.generate_enhanced_signals(indicators)
-                
-                ml_result = self.ml_predictor.predict(symbol, historical_data)
-                
-                current_price = historical_data['close'].iloc[-1]
-                atr = indicators.get('atr', current_price * 0.02)
-                
-                mtf_signals = self._multi_timeframe_analysis(historical_data)
-                
-                # Get composite score AND individual scores
-                score_results = self._calculate_aggressive_composite_score(signals, ml_result, mtf_signals, aggressiveness)
-                composite_score = score_results['composite_score']
-                
-                action, confidence = self._determine_aggressive_action(composite_score, signals, ml_result, aggressiveness)
-                
-                position_info = self.risk_manager.calculate_aggressive_position_size(
-                    symbol, confidence, current_price, atr, portfolio_value, aggressiveness
-                )
-                
-                volatility_regime = 'high' if indicators.get('atr_percent', 0) > 3 else 'low' if indicators.get('atr_percent', 0) < 1 else 'normal'
-                sl_tp_levels = self.risk_manager.calculate_aggressive_stop_loss(
-                    symbol, action, current_price, atr, aggressiveness
-                )
-                
-                trade_quality = self._assess_trade_quality(indicators, signals, ml_result, action)
-                market_context = self._analyze_market_context(indicators, historical_data)
-                
-                decision = {
-                    'symbol': symbol,
-                    'current_price': current_price,
-                    'action': action,
-                    'confidence': confidence,
-                    'composite_score': composite_score,
-                    # --- ADD INDIVIDUAL SCORES ---
-                    'trend_score': score_results['trend_score'],
-                    'mr_score': score_results['mr_score'],
-                    'breakout_score': score_results['breakout_score'],
-                    'ml_score': score_results['ml_score'],
-                    'mtf_score': score_results['mtf_score'],
-                    # --- END ADD ---
-                    'position_size': position_info['size_usdt'],
-                    'quantity': position_info['quantity'],
-                    'stop_loss': sl_tp_levels['stop_loss'],
-                    'take_profit': sl_tp_levels['take_profit'],
-                    'risk_reward_ratio': sl_tp_levels['risk_reward_ratio'],
-                    'signals': signals,
-                    'ml_prediction': ml_result,
-                    'market_regime': indicators.get('market_regime', 'neutral'),
-                    'volatility_regime': volatility_regime,
-                    'aggressiveness': aggressiveness,
-                    'trade_quality': trade_quality,
-                    'market_context': market_context,
-                    'timestamp': pd.Timestamp.now()
-                }
-                
-                if self.database and action != 'HOLD':
-                    # Prepare data for DB event (excluding potentially large objects like signals/ml_prediction)
-                    db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality']}
-                    self.database.store_system_event(
-                        "TRADING_DECISION",
-                        db_event_data,
-                        "INFO",
-                        "Strategy Analysis"
-                    )
-                
-                return decision
-                
+                # Pass the currently set aggressiveness level
+                return self.analyze_symbol_aggressive(symbol, historical_data, portfolio_value, self.aggressiveness)
             except Exception as e:
-                error_msg = f"Error in aggressive analysis for {symbol}: {e}"
+                error_msg = f"Error analyzing symbol {symbol}: {e}"
                 print(f"❌ {error_msg}")
-                
+
                 if self.error_handler:
-                    self.error_handler.handle_trading_error(e, symbol, "aggressive_analysis")
-                
-                # Ensure the error return structure matches the success structure for consistency
+                    self.error_handler.handle_trading_error(e, symbol, "analysis")
+
+                # Fallback structure (consistent with analyze_symbol_aggressive)
+                analysis_price = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
                 return {
                     'symbol': symbol,
-                    'current_price': historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0,
+                    'current_price': analysis_price, # Use analysis price for fallback consistency
                     'action': 'HOLD',
                     'confidence': 0,
                     'composite_score': 0,
-                    'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0, # Add defaults
+                    'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
                     'position_size': 0,
                     'quantity': 0,
                     'stop_loss': 0,
                     'take_profit': 0,
                     'risk_reward_ratio': 0,
                     'signals': {},
-                    'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0}, # Add default raw_prediction
+                    'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0},
                     'market_regime': 'neutral',
                     'volatility_regime': 'normal',
-                    'aggressiveness': aggressiveness or self.aggressiveness,
+                    'aggressiveness': self.aggressiveness,
                     'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
                     'market_context': {},
                     'timestamp': pd.Timestamp.now(),
                     'analysis_error': str(e)
                 }
+    
+    def analyze_symbol_aggressive(self, symbol: str, historical_data: pd.DataFrame,
+                                        portfolio_value: float, aggressiveness: str = None) -> Dict:
+
+                if aggressiveness is None:
+                    aggressiveness = self.aggressiveness
+
+                try:
+                    if historical_data is None or len(historical_data) < 100:
+                        raise ValueError(f"Insufficient historical data for {symbol}")
+
+                    # --- Analysis Phase (using historical data) ---
+                    analysis_price = historical_data['close'].iloc[-1] # Price at the time of analysis trigger (kline close)
+                    indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
+                    signals = self.technical_analyzer.generate_enhanced_signals(indicators)
+                    ml_result = self.ml_predictor.predict(symbol, historical_data)
+                    atr = indicators.get('atr', analysis_price * 0.02) # Use analysis price for ATR context
+                    mtf_signals = self._multi_timeframe_analysis(historical_data)
+
+                    score_results = self._calculate_aggressive_composite_score(signals, ml_result, mtf_signals, aggressiveness)
+                    composite_score = score_results['composite_score']
+                    action, confidence = self._determine_aggressive_action(composite_score, signals, ml_result, aggressiveness)
+
+                    # --- Pre-Execution/Risk Phase (using LATEST price) ---
+                    # Fetch the most current price right before risk calculations
+                    latest_price = self.data_engine.get_current_price(symbol)
+                    if latest_price <= 0:
+                        # Handle case where latest price fetch failed
+                        self.logger.warning(f"Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
+                        if self.error_handler:
+                            self.error_handler.handle_data_error(Exception("Failed to get latest price"), "analyze_symbol_risk", symbol)
+                        latest_price = analysis_price # Fallback
+
+                    # Update ATR based on latest price if significantly different (optional, depends on strategy)
+                    # atr = indicators.get('atr', latest_price * 0.02) # Or keep ATR based on analysis candle
+
+                    # Use LATEST price for sizing and SL/TP calculations
+                    position_info = self.risk_manager.calculate_aggressive_position_size(
+                        symbol, confidence, latest_price, atr, portfolio_value, aggressiveness
+                    )
+
+                    volatility_regime = 'high' if indicators.get('atr_percent', 0) > 3 else 'low' if indicators.get('atr_percent', 0) < 1 else 'normal'
+
+                    sl_tp_levels = {}
+                    if action != 'HOLD': # Calculate SL/TP only if an action is decided
+                        sl_tp_levels = self.risk_manager.calculate_aggressive_stop_loss(
+                            symbol, action, latest_price, atr, aggressiveness # Use LATEST price here
+                        )
+                    else:
+                        # Provide default zero values if HOLD
+                        sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
+
+                    # --- Post-Analysis ---
+                    trade_quality = self._assess_trade_quality(indicators, signals, ml_result, action)
+                    market_context = self._analyze_market_context(indicators, historical_data) # Context based on analysis candle
+
+                    # --- Construct Final Decision ---
+                    decision = {
+                        'symbol': symbol,
+                        # IMPORTANT: Use LATEST_PRICE for execution reference
+                        'current_price': latest_price,
+                        'action': action,
+                        'confidence': confidence,
+                        'composite_score': composite_score,
+                        'trend_score': score_results['trend_score'],
+                        'mr_score': score_results['mr_score'],
+                        'breakout_score': score_results['breakout_score'],
+                        'ml_score': score_results['ml_score'],
+                        'mtf_score': score_results['mtf_score'],
+                        'position_size': position_info['size_usdt'],
+                        'quantity': position_info['quantity'], # Quantity based on LATEST price
+                        'stop_loss': sl_tp_levels['stop_loss'], # SL based on LATEST price
+                        'take_profit': sl_tp_levels['take_profit'], # TP based on LATEST price
+                        'risk_reward_ratio': sl_tp_levels['risk_reward_ratio'],
+                        'signals': signals, # Signals derived from historical data
+                        'ml_prediction': ml_result, # ML derived from historical data
+                        'market_regime': indicators.get('market_regime', 'neutral'),
+                        'volatility_regime': volatility_regime,
+                        'aggressiveness': aggressiveness,
+                        'trade_quality': trade_quality,
+                        'market_context': market_context,
+                        'timestamp': pd.Timestamp.now(),
+                        'analysis_price': analysis_price # Optionally include the price analysis was based on
+                    }
+
+                    if self.database and action != 'HOLD':
+                        db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality']}
+                        self.database.store_system_event("TRADING_DECISION", db_event_data, "INFO", "Strategy Analysis")
+
+                    return decision
+
+                except Exception as e:
+                    error_msg = f"Error in aggressive analysis for {symbol}: {e}"
+                    print(f"❌ {error_msg}")
+
+                    if self.error_handler:
+                        self.error_handler.handle_trading_error(e, symbol, "aggressive_analysis")
+
+                    # Ensure fallback uses a valid price, preferably analysis price if available
+                    analysis_price = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
+                    return {
+                        'symbol': symbol,
+                        'current_price': analysis_price, # Fallback uses analysis price
+                        'action': 'HOLD',
+                        'confidence': 0,
+                        'composite_score': 0,
+                        'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
+                        'position_size': 0,
+                        'quantity': 0,
+                        'stop_loss': 0,
+                        'take_profit': 0,
+                        'risk_reward_ratio': 0,
+                        'signals': {},
+                        'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0},
+                        'market_regime': 'neutral',
+                        'volatility_regime': 'normal',
+                        'aggressiveness': aggressiveness or self.aggressiveness,
+                        'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
+                        'market_context': {},
+                        'timestamp': pd.Timestamp.now(),
+                        'analysis_error': str(e)
+                    }
     
     def calculate_dynamic_weights(self, market_regime: str, volatility: float, recent_performance: dict, aggressiveness: str) -> Dict[str, float]:
         

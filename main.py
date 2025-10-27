@@ -78,7 +78,11 @@ class AdvancedTradingBot:
 
             self.risk_manager = AdvancedRiskManager(self.client, aggressiveness)
 
-            self.strategy_orchestrator = EnhancedStrategyOrchestrator(self.client, aggressiveness)
+            self.strategy_orchestrator = EnhancedStrategyOrchestrator(
+                self.client,
+                self.data_engine, # <-- Add this line
+                aggressiveness
+            )
 
             self.execution_engine = ExecutionEngine(self.client, self.risk_manager)
 
@@ -874,360 +878,331 @@ class AdvancedTradingBot:
 
             return getattr(self, '_last_portfolio_value', 10000)
 
-
-
     def run_trading_cycle(self):
-            cycle_start = time.time()
-            self.logger.info("Starting Enhanced Trading Cycle...")
-            
-            trading_decisions = [] # Stores full decision dicts for logging/return
-            all_symbol_data = {}
-            account_info = {}
-            
-            try:
-                print("\n" + "="*60)
-                print("🔄 Starting Enhanced Trading Cycle...")
-                print("="*60)
+                cycle_start = time.time()
+                self.logger.info("Starting Enhanced Trading Cycle...")
                 
-                # --- Pre-Cycle Checks ---
-                if not self.error_handler.should_continue_trading():
-                    print("🚫 Trading suspended due to error conditions")
-                    if self.telegram_bot:
-                        self.telegram_bot.send_channel_message(
-                            "🚫 <b>TRADING SUSPENDED</b>\n\n"
-                            "Too many errors detected. Check logs and reset error handler to resume."
-                        )
-                    return []
+                trading_decisions = [] # Stores full decision dicts for logging/return
+                all_symbol_data_copies = {} # Store copies for this cycle's analysis
+                account_info = {}
                 
-                # Get portfolio value safely and initialize if needed
-                portfolio_value = self.get_portfolio_value()
-                self._last_portfolio_value = portfolio_value # Cache the value
-                if self.risk_manager.daily_start_balance == 0:
-                    self.risk_manager.daily_start_balance = portfolio_value
-                    print(f"💰 Initialized daily starting balance: ${portfolio_value:.2f}")
-
-                # Emergency Check (needs portfolio value and trade history)
-                self.risk_manager.update_daily_pnl() # Ensure PnL is up-to-date for check
-                emergency_check = self.emergency_protocols.check_emergency_conditions(
-                    portfolio_value, 
-                    self.risk_manager.daily_pnl,
-                    self.execution_engine.get_trade_history(limit=10),
-                    self.error_handler.error_count
-                )
-                
-                if emergency_check['emergency']:
-                    print("🆘 Emergency conditions detected - skipping cycle")
-                    return []
-
-                # --- Step 1: Fetch All Market Data Concurrently (or Sequentially) ---
-                print("📊 Fetching market data for all symbols...")
-                fetch_start = time.time()
-                # Note: A truly concurrent implementation would use asyncio or threading here.
-                # This sequential version still improves structure over the original interleaving.
-                for symbol in SYMBOLS:
-                    try:
-                        data = self.data_engine.historical_data.get(symbol) # Check cache first
-                        if data is None or data.empty:
-                            data = self.data_engine.get_historical_data(symbol, TIMEFRAME)
-                        
-                        if data is not None and not data.empty and self.data_engine.validate_market_data(data):
-                            all_symbol_data[symbol] = data
-                        else:
-                            print(f"⚠️ Failed to fetch or validate data for {symbol}, skipping.")
-                            self.error_handler.handle_data_error(
-                                Exception("Failed/Invalid market data"), "cycle_data_fetch", symbol
-                            )
-                    except Exception as e:
-                        print(f"❌ Error fetching data for {symbol}: {e}")
-                        self.error_handler.handle_data_error(e, "cycle_data_fetch", symbol)
-                    time.sleep(0.1) # Small delay for rate limiting
-                fetch_duration = time.time() - fetch_start
-                print(f"   Data fetch complete in {fetch_duration:.2f}s")
-                
-                # --- Step 2: Fetch Account Data Once ---
-                print("💰 Fetching account balance and positions...")
-                account_fetch_start = time.time()
                 try:
-                    # Portfolio value already fetched, use cached
-                    account_info['portfolio_value'] = portfolio_value 
-                    # Fetch positions (can be passed to risk manager later if needed)
-                    positions_response = self.client.get_position_info() 
-                    if positions_response and positions_response.get('retCode') == 0:
-                        account_info['positions'] = {
-                            p['symbol']: p for p in positions_response['result']['list'] if float(p.get('size', 0)) > 0
-                        }
-                    else:
-                        account_info['positions'] = {}
-                        print("⚠️ Failed to fetch position info")
-                        self.error_handler.handle_api_error(Exception("Failed to get positions"), "cycle_account_fetch")
-                except Exception as e:
-                    print(f"❌ Error fetching account data: {e}")
-                    self.error_handler.handle_api_error(e, "cycle_account_fetch")
-                account_fetch_duration = time.time() - account_fetch_start
-                print(f"   Account data fetch complete in {account_fetch_duration:.2f}s")
-
-                # --- Step 3: Analyze Symbols (CPU-bound) ---
-                print("🧠 Analyzing symbols...")
-                analysis_start = time.time()
-                raw_decisions = [] # Holds the decision dictionaries generated by analysis
-                for symbol in SYMBOLS:
-                    if symbol not in all_symbol_data:
-                        continue # Skip if data fetch failed
-
-                    try:
-                        print(f"\n   🔍 Analyzing {symbol}...")
-                        historical_data = all_symbol_data[symbol]
-                        
-                        # This now returns the decision dict including individual strategy scores
-                        decision = self.strategy_orchestrator.analyze_symbol(
-                            symbol, historical_data, account_info['portfolio_value'] 
-                        )
-                        raw_decisions.append(decision)
-                        
-                        # Log basic decision info immediately
-                        action_emoji = "🎯" if decision['action'] != 'HOLD' else "⏸️"
-                        print(f"      {action_emoji} Decision: {decision['action']} (Conf: {decision['confidence']:.1f}%)")
-
-                    except Exception as e:
-                        error_msg = f"Error analyzing {symbol}: {e}"
-                        print(f"      ❌ {error_msg}")
-                        self.error_handler.handle_trading_error(e, symbol, "analysis")
+                    print("\n" + "="*60)
+                    print("🔄 Starting Enhanced Trading Cycle...")
+                    print("="*60)
+                    
+                    # --- Pre-Cycle Checks ---
+                    if not self.error_handler.should_continue_trading():
+                        print("🚫 Trading suspended due to error conditions")
                         if self.telegram_bot:
-                            self.telegram_bot.log_error(error_msg, f"Analysis - {symbol}")
-                analysis_duration = time.time() - analysis_start
-                print(f"   Analysis complete in {analysis_duration:.2f}s")
-                
-                # --- Step 4: Execute Trades ---
-                print("🚀 Executing trades...")
-                execution_start = time.time()
-                actions_taken = 0
-                strong_trades = 0
-                moderate_trades = 0
-                min_confidence = self.risk_manager.min_confidence
-
-                for decision in raw_decisions: # Iterate through decisions made in Step 3
-                    symbol = decision['symbol']
-                    action = decision['action']
-                    confidence = decision['confidence']
-                    signal_strength = decision.get('signals', {}).get('signal_strength', 'NEUTRAL')
-                    
-                    # Copy the full decision for the final return list and cycle logging
-                    trading_decisions.append(decision.copy()) 
-
-                    print(f"\n   🚦 Evaluating {symbol}: {action} (Conf: {confidence:.1f}%)")
-                    
-                    if action != 'HOLD':
-                        print(f"      📈 Signal Strength: {signal_strength}")
-                        print(f"      🎯 Composite Score: {decision['composite_score']:.1f}")
-                        print(f"      💰 Proposed Size: ${decision['position_size']:.2f}")
-                        print(f"      🛡️ SL: ${decision['stop_loss']:.2f}, TP: ${decision['take_profit']:.2f}, R/R: {decision['risk_reward_ratio']:.2f}:1")
-                        print(f"      🌡️ Regime: {decision['market_regime']}, Vol: {decision['volatility_regime']}")
-                        quality_rating = decision.get('trade_quality', {}).get('quality_rating', 'UNKNOWN')
-                        print(f"      🏆 Trade Quality: {quality_rating}")
-
-                    if action != 'HOLD' and confidence >= min_confidence:
-                        try:
-                            # Risk check uses decision['position_size'] calculated during analysis
-                            # Pass pre-fetched account_info if risk manager needs it (e.g., correlation checks)
-                            risk_check = self.risk_manager.can_trade(symbol, decision['position_size'], market_data=self.risk_manager.correlation_matrix) 
-
-                            if risk_check['approved']:
-                                # Use adjusted size if provided by risk manager
-                                adjusted_size = risk_check.get('adjusted_size', decision['position_size'])
-                                if adjusted_size > 0 and adjusted_size != decision['position_size']:
-                                    print(f"      ℹ️ Adjusting size for {symbol}: ${adjusted_size:.2f} (Reason: {risk_check['reason']})")
-                                    decision['position_size'] = adjusted_size
-                                    decision['quantity'] = adjusted_size / decision['current_price'] if decision['current_price'] > 0 else 0
-                                elif adjusted_size <= 0:
-                                    print(f"      ❌ Risk manager approved but adjusted size is <= 0 ({adjusted_size:.2f}). Skipping.")
-                                    continue # Skip if adjusted size is zero or less
-
-                                # Ensure quantity is positive after potential adjustment
-                                if decision['quantity'] <= 0:
-                                    print(f"      ❌ Calculated quantity is zero or negative ({decision['quantity']:.4f}). Skipping.")
-                                    continue
-
-                                execution_result = self.execution_engine.execute_enhanced_trade(decision) 
-                                
-                                if execution_result['success']:
-                                    print(f"      ✅ Trade executed successfully!")
-                                    actions_taken += 1
-                                    
-                                    # Prepare trade_record including individual scores from 'decision'
-                                    trade_record = decision.copy() 
-                                    trade_record.update({
-                                        'success': True,
-                                        'order_id': execution_result.get('order_id'),
-                                        'timestamp': pd.Timestamp.now(),
-                                        'entry_price': execution_result.get('executed_price', decision.get('current_price')) 
-                                    })
-                                    
-                                    # Remove large objects before DB storage if necessary
-                                    # trade_record.pop('signals', None)
-                                    # trade_record.pop('ml_prediction', None) 
-                                    
-                                    # Store the trade with individual scores
-                                    self.database.store_trade(trade_record) 
-                                    self.risk_manager.record_trade_outcome(True, pnl=0) 
-                                    
-                                    if signal_strength in ['STRONG_BUY', 'STRONG_SELL']:
-                                        strong_trades += 1
-                                    else:
-                                        moderate_trades += 1
-                                    
-                                    if self.telegram_bot:
-                                        self.telegram_bot.log_trade_execution(decision)
-                                    
-                                    if 'order_id' in execution_result:
-                                        print(f"         📝 Order ID: {execution_result['order_id']}")
-                                else:
-                                    error_msg = execution_result['message']
-                                    print(f"      ❌ Trade execution failed: {error_msg}")
-                                    trade_record = decision.copy()
-                                    trade_record.update({
-                                        'success': False,
-                                        'error_message': error_msg,
-                                        'timestamp': pd.Timestamp.now() 
-                                    })
-                                    # trade_record.pop('signals', None) # Optional cleanup
-                                    # trade_record.pop('ml_prediction', None)
-                                    self.database.store_trade(trade_record) # Store failed trade attempt
-                                    self.risk_manager.record_trade_outcome(False, pnl=0)
-                                    if self.telegram_bot:
-                                        self.telegram_bot.log_trade_error(symbol, action, error_msg)
-                                    self.error_handler.handle_trading_error(
-                                        Exception(error_msg), symbol, f"execution_{action}"
-                                    )
-                            else:
-                                print(f"      ❌ Risk management rejected trade: {risk_check['reason']}")
-                                # Log rejected trade attempt (optional)
-                                trade_record = decision.copy()
-                                trade_record.update({
-                                    'success': False,
-                                    'error_message': f"Risk rejected: {risk_check['reason']}",
-                                    'timestamp': pd.Timestamp.now()
-                                })
-                                # trade_record.pop('signals', None) # Optional cleanup
-                                # trade_record.pop('ml_prediction', None)
-                                # self.database.store_trade(trade_record) # Uncomment to log rejected attempts
-
-                        except Exception as exec_e:
-                            error_msg = f"Unhandled error during execution for {symbol}: {exec_e}"
-                            print(f"      ❌ {error_msg}")
-                            self.error_handler.handle_trading_error(exec_e, symbol, f"execution_wrapper_{action}")
-                            if self.telegram_bot:
-                                self.telegram_bot.log_error(error_msg, f"Execution - {symbol}")
-
-                    elif action != 'HOLD':
-                        print(f"      ⚠️ Skipping trade - confidence {confidence:.1f}% below minimum {min_confidence}%")
-                
-                execution_duration = time.time() - execution_start
-                print(f"   Execution attempts complete in {execution_duration:.2f}s")
-
-                # --- Cycle Summary ---
-                print(f"\n📈 Cycle Summary:")
-                print(f"   • {actions_taken} trades executed out of {len(raw_decisions)} decisions") 
-                print(f"   • {strong_trades} strong signals, {moderate_trades} moderate signals executed")
-                print(f"   • Aggressiveness: {self.aggressiveness.upper()}")
-                
-                new_portfolio_value = self.get_portfolio_value() # Get fresh value after trades
-                self._last_portfolio_value = new_portfolio_value 
-                
-                self.risk_manager.update_daily_pnl() # Ensure PnL reflects latest value
-                pnl_percent = self.risk_manager.daily_pnl
-                pnl = new_portfolio_value - self.risk_manager.daily_start_balance
-                
-                print(f"   💰 Portfolio: ${new_portfolio_value:.2f} ({pnl_percent:+.2f}%)")
-                
-                performance = self.execution_engine.get_performance_metrics()
-                if performance:
-                    print(f"   📊 Win Rate (Session): {performance.get('win_rate', 0):.1f}%")
-                    print(f"   🎯 Avg Confidence (Session): {performance.get('avg_confidence', 0):.1f}%")
-                    
-                    self.database.store_performance_metrics({
-                        'portfolio_value': new_portfolio_value,
-                        'daily_pnl_percent': pnl_percent,
-                        'total_trades': performance.get('total_trades', 0),
-                        'winning_trades': int(performance.get('total_trades', 0) * performance.get('win_rate', 0) / 100),
-                        'win_rate': performance.get('win_rate', 0),
-                        'avg_confidence': performance.get('avg_confidence', 0),
-                        'avg_risk_reward': performance.get('avg_risk_reward', 0),
-                        'max_drawdown': 0 # Placeholder - needs proper calculation
-                    })
-                else:
-                    self.database.store_performance_metrics({
-                        'portfolio_value': new_portfolio_value,
-                        'daily_pnl_percent': pnl_percent,
-                        'total_trades': 0, 'winning_trades': 0, 'win_rate': 0,
-                        'avg_confidence': 0, 'avg_risk_reward': 0, 'max_drawdown': 0
-                    })
-                
-                if self.telegram_bot and (actions_taken > 0 or abs(pnl_percent) > 0.5):
-                    summary = {
-                        'trades_executed': actions_taken,
-                        'strong_signals': strong_trades,
-                        'moderate_signals': moderate_trades,
-                        'portfolio_value': new_portfolio_value,
-                        'pnl_percent': pnl_percent,
-                        'aggressiveness': self.aggressiveness
-                    }
-                    self.telegram_bot.log_cycle_summary(summary)
-                
-                self.database.store_system_event(
-                    "TRADING_CYCLE_COMPLETE",
-                    {
-                        'trades_executed': actions_taken,
-                        'portfolio_value': new_portfolio_value,
-                        'pnl_percent': pnl_percent,
-                        'cycle_pnl': pnl
-                    },
-                    "INFO",
-                    "Trading Cycle"
-                )
-                
-                # --- Periodic Tasks ---
-                if hasattr(self, 'cycle_count'):
-                    if self.cycle_count % 5 == 0:
-                        print("🔄 Optimizing strategy weights...")
-                        self._optimize_strategy_weights() # Assumes _optimize_strategy_weights uses pre-fetched data or re-fetches efficiently
-                    
-                    if self.cycle_count % 10 == 0:
-                        print("🔄 Retraining ML models with new data...")
-                        if self.telegram_bot:
-                            self.telegram_bot.log_important_event(
-                                "MODEL RETRAINING",
-                                f"Starting periodic retraining of ML models\nCycle: #{self.cycle_count}"
+                            self.telegram_bot.send_channel_message(
+                                "🚫 <b>TRADING SUSPENDED</b>\n\n"
+                                "Too many errors detected. Check logs and reset error handler to resume."
                             )
-                        # Call the dedicated retraining function which handles its own data fetching
-                        self._retrain_all_models() 
-
-                cycle_duration = time.time() - cycle_start
-                # Use the 'trading_decisions' list which contains all decisions made in the cycle
-                self._log_trading_cycle_metrics(trading_decisions, cycle_duration) 
-                self._monitor_system_health()
-                
-                self.logger.info(f"Enhanced Trading Cycle completed in {cycle_duration:.2f} seconds.")
-                
-                return trading_decisions # Return the full list of decisions made
+                        return []
                     
-            except Exception as e:
-                cycle_duration = time.time() - cycle_start
-                self.logger.error(
-                    "Trading cycle failed",
-                    extra={
-                        'error': str(e),
-                        'cycle_duration': cycle_duration,
-                        'timestamp': datetime.now().isoformat()
-                    }
-                )
-                error_msg = f"Critical Error in trading cycle: {e}"
-                print(f"❌ {error_msg}")
-                self.error_handler.handle_trading_error(e, "ALL", "trading_cycle_main")
-                if self.telegram_bot:
-                    self.telegram_bot.log_error(error_msg, "Trading Cycle Main Loop")
-                
-                return [] # Return empty list on major failure
+                    portfolio_value = self.get_portfolio_value()
+                    self._last_portfolio_value = portfolio_value
+                    if self.risk_manager.daily_start_balance == 0:
+                        self.risk_manager.daily_start_balance = portfolio_value
+                        print(f"💰 Initialized daily starting balance: ${portfolio_value:.2f}")
 
+                    self.risk_manager.update_daily_pnl()
+                    emergency_check = self.emergency_protocols.check_emergency_conditions(
+                        portfolio_value, 
+                        self.risk_manager.daily_pnl,
+                        self.execution_engine.get_trade_history(limit=10),
+                        self.error_handler.error_count
+                    )
+                    
+                    if emergency_check['emergency']:
+                        print("🆘 Emergency conditions detected - skipping cycle")
+                        return []
+
+                    # --- Step 1: Get Current Market Data State (Updated by WS) ---
+                    print("📊 Accessing latest market data...")
+                    data_access_start = time.time()
+                    valid_data_count = 0
+                    for symbol in SYMBOLS:
+                        # Get a COPY of the latest data frame managed by DataEngine
+                        data_copy = self.data_engine.get_market_data_for_analysis(symbol)
+                        if data_copy is not None and not data_copy.empty and self.data_engine.validate_market_data(data_copy):
+                            all_symbol_data_copies[symbol] = data_copy
+                            valid_data_count += 1
+                        else:
+                            print(f"⚠️ Could not get valid data for {symbol} for this cycle.")
+                            # Error handled within get_market_data_for_analysis or validate
+                    data_access_duration = time.time() - data_access_start
+                    print(f"   Accessed data for {valid_data_count}/{len(SYMBOLS)} symbols in {data_access_duration:.2f}s")
+                    
+                    # Exit cycle if no valid data is available for any symbol
+                    if valid_data_count == 0:
+                        print("🚫 No valid market data available for any symbol. Skipping cycle.")
+                        return []
+
+                    # --- Step 2: Fetch Account Data Once ---
+                    print("💰 Fetching account balance and positions...")
+                    account_fetch_start = time.time()
+                    try:
+                        account_info['portfolio_value'] = portfolio_value 
+                        positions_response = self.client.get_position_info() 
+                        if positions_response and positions_response.get('retCode') == 0:
+                            account_info['positions'] = {
+                                p['symbol']: p for p in positions_response['result']['list'] if float(p.get('size', 0)) > 0
+                            }
+                        else:
+                            account_info['positions'] = {}
+                            print("⚠️ Failed to fetch position info")
+                            self.error_handler.handle_api_error(Exception("Failed to get positions"), "cycle_account_fetch")
+                    except Exception as e:
+                        print(f"❌ Error fetching account data: {e}")
+                        self.error_handler.handle_api_error(e, "cycle_account_fetch")
+                    account_fetch_duration = time.time() - account_fetch_start
+                    print(f"   Account data fetch complete in {account_fetch_duration:.2f}s")
+
+                    # --- Step 3: Analyze Symbols (Using Data Copies) ---
+                    print("🧠 Analyzing symbols...")
+                    analysis_start = time.time()
+                    raw_decisions = [] 
+                    for symbol in SYMBOLS:
+                        if symbol not in all_symbol_data_copies:
+                            continue 
+
+                        try:
+                            print(f"\n   🔍 Analyzing {symbol}...")
+                            # Use the data copy obtained in Step 1
+                            historical_data_copy = all_symbol_data_copies[symbol] 
+                            
+                            decision = self.strategy_orchestrator.analyze_symbol(
+                                symbol, historical_data_copy, account_info['portfolio_value'] 
+                            )
+                            raw_decisions.append(decision)
+                            
+                            action_emoji = "🎯" if decision['action'] != 'HOLD' else "⏸️"
+                            print(f"      {action_emoji} Decision: {decision['action']} (Conf: {decision['confidence']:.1f}%)")
+
+                        except Exception as e:
+                            error_msg = f"Error analyzing {symbol}: {e}"
+                            print(f"      ❌ {error_msg}")
+                            self.error_handler.handle_trading_error(e, symbol, "analysis")
+                            if self.telegram_bot:
+                                self.telegram_bot.log_error(error_msg, f"Analysis - {symbol}")
+                    analysis_duration = time.time() - analysis_start
+                    print(f"   Analysis complete in {analysis_duration:.2f}s")
+                    
+                    # --- Step 4: Execute Trades ---
+                    # (Execution logic remains largely the same as provided previously,
+                    #  using the 'decision' objects generated in Step 3 which contain
+                    #  calculated size, sl, tp etc.)
+                    print("🚀 Executing trades...")
+                    execution_start = time.time()
+                    actions_taken = 0
+                    strong_trades = 0
+                    moderate_trades = 0
+                    min_confidence = self.risk_manager.min_confidence
+
+                    for decision in raw_decisions: 
+                        symbol = decision['symbol']
+                        action = decision['action']
+                        confidence = decision['confidence']
+                        signal_strength = decision.get('signals', {}).get('signal_strength', 'NEUTRAL')
+                        
+                        trading_decisions.append(decision.copy()) 
+
+                        print(f"\n   🚦 Evaluating {symbol}: {action} (Conf: {confidence:.1f}%)")
+                        
+                        if action != 'HOLD':
+                            print(f"      📈 Signal Strength: {signal_strength}")
+                            print(f"      🎯 Composite Score: {decision['composite_score']:.1f}")
+                            print(f"      💰 Proposed Size: ${decision['position_size']:.2f}")
+                            print(f"      🛡️ SL: ${decision['stop_loss']:.2f}, TP: ${decision['take_profit']:.2f}, R/R: {decision['risk_reward_ratio']:.2f}:1")
+                            print(f"      🌡️ Regime: {decision['market_regime']}, Vol: {decision['volatility_regime']}")
+                            quality_rating = decision.get('trade_quality', {}).get('quality_rating', 'UNKNOWN')
+                            print(f"      🏆 Trade Quality: {quality_rating}")
+
+                        if action != 'HOLD' and confidence >= min_confidence:
+                            try:
+                                # Pass market_data=None initially, risk manager can fetch correlation if needed
+                                risk_check = self.risk_manager.can_trade(symbol, decision['position_size'], market_data=None) 
+
+                                if risk_check['approved']:
+                                    adjusted_size = risk_check.get('adjusted_size', decision['position_size'])
+                                    if adjusted_size > 0 and adjusted_size != decision['position_size']:
+                                        print(f"      ℹ️ Adjusting size for {symbol}: ${adjusted_size:.2f} (Reason: {risk_check['reason']})")
+                                        # Update decision dict before execution
+                                        decision['position_size'] = adjusted_size
+                                        # Use the latest price for quantity calculation during execution
+                                        latest_price = self.data_engine.get_current_price(symbol)
+                                        if latest_price <= 0:
+                                            print(f"      ❌ Cannot calculate quantity for adjusted size, invalid latest price ({latest_price}). Skipping.")
+                                            continue
+                                        decision['quantity'] = adjusted_size / latest_price
+                                    elif adjusted_size <= 0:
+                                        print(f"      ❌ Risk manager approved but adjusted size is <= 0 ({adjusted_size:.2f}). Skipping.")
+                                        continue
+                                    
+                                    # Use latest price for execution checks if needed, but decision SL/TP is based on analysis price
+                                    decision['current_price'] = self.data_engine.get_current_price(symbol)
+                                    if decision['current_price'] <= 0:
+                                        print(f"      ❌ Cannot execute trade, invalid latest price ({decision['current_price']}). Skipping.")
+                                        continue
+                                        
+                                    # Ensure quantity is positive
+                                    if decision['quantity'] <= 0:
+                                        print(f"      ❌ Calculated quantity is zero or negative ({decision['quantity']:.4f}). Skipping.")
+                                        continue
+
+                                    execution_result = self.execution_engine.execute_enhanced_trade(decision) 
+                                    
+                                    if execution_result['success']:
+                                        print(f"      ✅ Trade executed successfully!")
+                                        actions_taken += 1
+                                        
+                                        trade_record = decision.copy() 
+                                        trade_record.update({
+                                            'success': True,
+                                            'order_id': execution_result.get('order_id'),
+                                            'timestamp': pd.Timestamp.now(),
+                                            # Use actual executed price if available from result
+                                            'entry_price': execution_result.get('price', decision.get('current_price')) 
+                                        })
+                                        
+                                        self.database.store_trade(trade_record) 
+                                        self.risk_manager.record_trade_outcome(True, pnl=0) 
+                                        
+                                        if signal_strength in ['STRONG_BUY', 'STRONG_SELL']:
+                                            strong_trades += 1
+                                        else:
+                                            moderate_trades += 1
+                                        
+                                        if self.telegram_bot:
+                                            self.telegram_bot.log_trade_execution(decision) # Log original decision intent
+                                        
+                                        if 'order_id' in execution_result:
+                                            print(f"         📝 Order ID: {execution_result['order_id']}")
+                                    else:
+                                        # Log failed execution attempts
+                                        error_msg = execution_result['message']
+                                        print(f"      ❌ Trade execution failed: {error_msg}")
+                                        trade_record = decision.copy()
+                                        trade_record.update({
+                                            'success': False,
+                                            'error_message': error_msg,
+                                            'timestamp': pd.Timestamp.now() 
+                                        })
+                                        self.database.store_trade(trade_record)
+                                        self.risk_manager.record_trade_outcome(False, pnl=0)
+                                        if self.telegram_bot:
+                                            self.telegram_bot.log_trade_error(symbol, action, error_msg)
+                                        self.error_handler.handle_trading_error(
+                                            Exception(error_msg), symbol, f"execution_{action}"
+                                        )
+                                else:
+                                    print(f"      ❌ Risk management rejected trade: {risk_check['reason']}")
+                                    # Optionally log rejected trade attempts
+                                    # ... (logging code as before) ...
+
+                            except Exception as exec_e:
+                                error_msg = f"Unhandled error during execution for {symbol}: {exec_e}"
+                                print(f"      ❌ {error_msg}")
+                                self.error_handler.handle_trading_error(exec_e, symbol, f"execution_wrapper_{action}")
+                                if self.telegram_bot:
+                                    self.telegram_bot.log_error(error_msg, f"Execution - {symbol}")
+
+                        elif action != 'HOLD':
+                            print(f"      ⚠️ Skipping trade - confidence {confidence:.1f}% below minimum {min_confidence}%")
+                    
+                    execution_duration = time.time() - execution_start
+                    print(f"   Execution attempts complete in {execution_duration:.2f}s")
+
+                    # --- Cycle Summary ---
+                    print(f"\n📈 Cycle Summary:")
+                    print(f"   • {actions_taken} trades executed out of {len(raw_decisions)} decisions") 
+                    print(f"   • {strong_trades} strong signals, {moderate_trades} moderate signals executed")
+                    print(f"   • Aggressiveness: {self.aggressiveness.upper()}")
+                    
+                    new_portfolio_value = self.get_portfolio_value() 
+                    self._last_portfolio_value = new_portfolio_value 
+                    
+                    self.risk_manager.update_daily_pnl() 
+                    pnl_percent = self.risk_manager.daily_pnl
+                    pnl = new_portfolio_value - self.risk_manager.daily_start_balance
+                    
+                    print(f"   💰 Portfolio: ${new_portfolio_value:.2f} ({pnl_percent:+.2f}%)")
+                    
+                    # Store performance metrics (logic remains the same)
+                    performance = self.execution_engine.get_performance_metrics()
+                    if performance:
+                        print(f"   📊 Win Rate (Session): {performance.get('win_rate', 0):.1f}%")
+                        print(f"   🎯 Avg Confidence (Session): {performance.get('avg_confidence', 0):.1f}%")
+                        
+                        self.database.store_performance_metrics({
+                            'portfolio_value': new_portfolio_value,
+                            'daily_pnl_percent': pnl_percent,
+                            'total_trades': performance.get('total_trades', 0),
+                            'winning_trades': int(performance.get('total_trades', 0) * performance.get('win_rate', 0) / 100),
+                            'win_rate': performance.get('win_rate', 0),
+                            'avg_confidence': performance.get('avg_confidence', 0),
+                            'avg_risk_reward': performance.get('avg_risk_reward', 0),
+                            'max_drawdown': 0 # Needs proper calculation
+                        })
+                    else:
+                        self.database.store_performance_metrics({
+                            'portfolio_value': new_portfolio_value, 'daily_pnl_percent': pnl_percent,
+                            'total_trades': 0, 'winning_trades': 0, 'win_rate': 0,
+                            'avg_confidence': 0, 'avg_risk_reward': 0, 'max_drawdown': 0
+                        })
+                    
+                    # Send Telegram summary (logic remains the same)
+                    if self.telegram_bot and (actions_taken > 0 or abs(pnl_percent) > 0.5):
+                        # ... (telegram summary code) ...
+                        summary = {
+                            'trades_executed': actions_taken, 'strong_signals': strong_trades,
+                            'moderate_signals': moderate_trades, 'portfolio_value': new_portfolio_value,
+                            'pnl_percent': pnl_percent, 'aggressiveness': self.aggressiveness
+                        }
+                        self.telegram_bot.log_cycle_summary(summary)
+
+                    # Store cycle complete event (logic remains the same)
+                    self.database.store_system_event("TRADING_CYCLE_COMPLETE", # ... (event data) ...
+                        { 'trades_executed': actions_taken, 'portfolio_value': new_portfolio_value,
+                        'pnl_percent': pnl_percent, 'cycle_pnl': pnl }, "INFO", "Trading Cycle")
+                    
+                    # --- Periodic Tasks ---
+                    if hasattr(self, 'cycle_count'):
+                        if self.cycle_count % 5 == 0: # Optimize weights every 5 cycles
+                            print("🔄 Optimizing strategy weights...")
+                            self._optimize_strategy_weights() 
+                        
+                        # Retrain more frequently, e.g., every 60 cycles (approx every hour if 1min wait)
+                        # Adjust based on timeframe and desired retraining frequency
+                        if self.cycle_count % 60 == 0: 
+                            print("🔄 Retraining ML models with new data...")
+                            if self.telegram_bot:
+                                self.telegram_bot.log_important_event("MODEL RETRAINING", f"Starting periodic retraining\nCycle: #{self.cycle_count}")
+                            # Run retraining in a separate thread to avoid blocking main loop
+                            retrain_thread = threading.Thread(target=self._retrain_all_models, daemon=True)
+                            retrain_thread.start()
+
+                    cycle_duration = time.time() - cycle_start
+                    self._log_trading_cycle_metrics(trading_decisions, cycle_duration) 
+                    self._monitor_system_health()
+                    
+                    self.logger.info(f"Enhanced Trading Cycle completed in {cycle_duration:.2f} seconds.")
+                    
+                    return trading_decisions 
+                        
+                except Exception as e:
+                    # Error handling remains the same
+                    # ... (error logging code) ...
+                    cycle_duration = time.time() - cycle_start
+                    self.logger.error("Trading cycle failed", extra={'error': str(e), 'cycle_duration': cycle_duration, 'timestamp': datetime.now().isoformat()})
+                    error_msg = f"Critical Error in trading cycle: {e}"
+                    print(f"❌ {error_msg}")
+                    self.error_handler.handle_trading_error(e, "ALL", "trading_cycle_main")
+                    if self.telegram_bot:
+                        self.telegram_bot.log_error(error_msg, "Trading Cycle Main Loop")
+                    return []
 
 
     def _optimize_strategy_weights(self):
@@ -1667,259 +1642,191 @@ class AdvancedTradingBot:
         self.emergency_protocols.reset_emergency_mode(reason)
 
 
-
 def main():
-
     print("🚀 Advanced Bybit Trading Bot Starting...")
-
     print("🔐 Using DEMO TRADING environment")
-
     print("🧠 Features: ML Prediction + Advanced TA + Risk Management")
-
     print("💾 Model Persistence: Enabled")
-
     print("📱 Telegram Logging & Commands: Enabled")
-
     print("🎯 Multiple Aggressiveness Levels Available")
-
     print("🛡️ Enhanced Error Handling: Active")
-
     print("💾 Database Logging: Active")
-
     print("🆘 Emergency Protocols: Active")
 
-    
+    selected_aggressiveness = "moderate" # Default or get from user/config
+    mode_choice = "1" # Default to live mode
 
-    selected_aggressiveness = "moderate"
-
-    mode_choice = "1"
-
-    
+    # --- Simplified Startup Selection (Example - keep commented out or remove for production) ---
+    # print("\nSelect Mode:")
+    # print("  1. Live Trading (Demo Account)")
+    # print("  2. Backtest Mode (Simulated)")
+    # mode_choice = input("Enter choice (1 or 2): ") or "1"
+    # if mode_choice not in ["1", "2"]: mode_choice = "1"
+    #
+    # print("\nSelect Aggressiveness:")
+    # print("  1. Conservative")
+    # print("  2. Moderate (Default)")
+    # print("  3. Aggressive")
+    # print("  4. High")
+    # agg_choice = input("Enter choice (1-4, default 2): ") or "2"
+    # levels = { "1": "conservative", "2": "moderate", "3": "aggressive", "4": "high" }
+    # selected_aggressiveness = levels.get(agg_choice, "moderate")
+    # --- End Selection ---
 
     print(f"\n🎯 Selected: {selected_aggressiveness.upper()} mode")
-
-    print("🎮 Mode: LIVE TRADING")
-
-    
+    print("🎮 Mode: LIVE TRADING" if mode_choice == "1" else "🎮 Mode: BACKTEST")
 
     bot = None
-
     try:
-
         bot = AdvancedTradingBot(aggressiveness=selected_aggressiveness)
-
-        
 
         bot.start_telegram_bot()
 
-        
-
         if mode_choice == "1":
-
             cycle_count = 0
-
             print("\n🔔 Live trading started. Press Ctrl+C to stop.")
-
             print("💡 You can control the bot via Telegram commands!")
-
             print("💡 Use /help in Telegram to see available commands")
 
-            
+            # --- WebSocket Wait Logic ---
+            kline_interval_minutes = int(TIMEFRAME) # Assuming TIMEFRAME is in minutes
+            last_kline_timestamp = None
 
-            while True:
-
+            while True: # Main loop now waits for kline close
                 try:
-
                     cycle_count += 1
+                    bot.cycle_count = cycle_count # Make cycle count available to bot methods
 
-                    bot.cycle_count = cycle_count
+                    # --- Wait for next kline close ---
+                    print(f"\n⏰ Waiting for next {TIMEFRAME}m kline close...")
+                    while True:
+                        current_kline_ts = None
+                        # Get latest kline data for a primary symbol (e.g., BTC) to check timestamp
+                        primary_symbol = SYMBOLS[0]
+                        latest_data = bot.data_engine.get_market_data_for_analysis(primary_symbol)
 
-                    
+                        if latest_data is not None and not latest_data.empty:
+                            # Ensure timestamp column exists before accessing
+                            if 'timestamp' in latest_data.columns:
+                                current_kline_ts = latest_data['timestamp'].iloc[-1]
+                            elif isinstance(latest_data.index, pd.DatetimeIndex): # Check if timestamp is the index
+                                current_kline_ts = latest_data.index[-1]
 
+
+                        # Initialize last_kline_timestamp on first run or if it's None
+                        if last_kline_timestamp is None and current_kline_ts is not None:
+                            last_kline_timestamp = current_kline_ts
+                            print(f"   Initial kline timestamp: {last_kline_timestamp}")
+
+                        # Check if a new kline has arrived
+                        if current_kline_ts is not None and last_kline_timestamp is not None and current_kline_ts > last_kline_timestamp:
+                            print(f"   ✅ New kline detected: {current_kline_ts} (Previous: {last_kline_timestamp})")
+                            last_kline_timestamp = current_kline_ts
+                            break # Exit wait loop and run trading cycle
+                        # else:
+                            # Optional: Print waiting status periodically
+                            # print(f"   Waiting... Current TS: {current_kline_ts}", end='\r')
+
+                        # Wait briefly before checking again
+                        time.sleep(5) # Check every 5 seconds
+                    # --- End Wait Logic ---
+
+                    # Now run the cycle using the data updated by WebSocket
                     print(f"\n{'='*70}")
-
-                    print(f"📈 LIVE TRADING CYCLE #{cycle_count}")
-
+                    print(f"📈 LIVE TRADING CYCLE #{cycle_count} (Kline: {last_kline_timestamp})")
                     print(f"🎯 Aggressiveness: {bot.aggressiveness.upper()}")
-
                     print(f"🛡️ Error Status: {bot.error_handler.get_health_status()}")
-
                     print(f"{'='*70}")
 
-                    
-
                     bot.run_trading_cycle()
-
-                    
-
-                    print(f"\n⏰ Waiting 1 minute for next cycle...")
-
-                    
-
-                    # Wait efficiently
-
-                    sleep_interval = 10
-
-                    wait_time = 60
-
-                    while wait_time > 0:
-
-                        print(f"Next cycle in {wait_time} seconds...{' '*10}", end='\r')
-
-                        time.sleep(min(sleep_interval, wait_time))
-
-                        wait_time -= sleep_interval
-
-                    print(" " * 50, end='\r') # Clear the line
-
-
-
-                    
+                    # No long sleep needed here, loop will wait for the next kline
 
                 except KeyboardInterrupt:
-
                     print("\n\n🛑 Bot stopping...")
-
                     portfolio_value = bot.get_portfolio_value()
-
                     performance = bot.get_performance_summary()
 
-                    
+                    # --- ADD WebSocket Stop ---
+                    print("🔌 Stopping WebSocket streams...")
+                    bot.data_engine.stop()
+                    # -------------------------
 
-                    bot.database.store_system_event(
+                    # Store stop event
+                    bot.database.store_system_event( "BOT_STOPPED",
+                        { 'final_portfolio_value': portfolio_value, 'total_cycles': cycle_count, 'performance': performance }, "INFO", "System Shutdown")
 
-                        "BOT_STOPPED",
-
-                        {
-
-                            'final_portfolio_value': portfolio_value,
-
-                            'total_cycles': cycle_count,
-
-                            'performance': performance
-
-                        },
-
-                        "INFO",
-
-                        "System Shutdown"
-
-                    )
-
-                    
-
+                    # Send Telegram stop message
                     if bot.telegram_bot:
-
                         bot.telegram_bot.send_channel_message(
-
                             f"🛑 <b>TRADING BOT STOPPED</b>\n\n"
-
                             f"💰 <b>Final Portfolio:</b> ${portfolio_value:,.2f}\n"
-
                             f"📈 <b>Total Trades:</b> {performance.get('total_trades', 0)}\n"
-
                             f"🎯 <b>Win Rate:</b> {performance.get('win_rate', 0):.1f}%\n"
-
                             f"🛡️ <b>Error Count:</b> {bot.error_handler.error_count}\n"
-
                             f"🕒 <b>Time:</b> {pd.Timestamp.now().strftime('%H:%M:%S')}"
-
                         )
 
-                    
-
+                    # Save models
                     print("💾 Saving models before exit...")
-
                     bot.strategy_orchestrator.ml_predictor.save_models()
 
-                    
-
+                    # Close database
                     print("💾 Closing database connection...")
-
                     bot.database.close()
 
-                    
-
                     print("✅ Bot stopped gracefully.")
-
-                    break
+                    break # Exit the main while loop
 
                 except Exception as e:
-
+                    # Main loop error handling
                     error_msg = f"Critical error in main loop: {e}"
-
                     print(f"\n❌ {error_msg}")
-
-                    # Use logger if available, otherwise print stack trace
-
                     if hasattr(bot, 'logger'):
-
-                         bot.logger.critical(error_msg, exc_info=True)
-
+                        bot.logger.critical(error_msg, exc_info=True)
                     else:
-
-                         import traceback
-
-                         traceback.print_exc()
-
-
+                        import traceback
+                        traceback.print_exc()
 
                     if bot: # Ensure bot object exists
-
-                         bot.error_handler.handle_trading_error(e, "ALL", "main_loop_critical")
-
-                         if bot.telegram_bot:
-
-                             bot.telegram_bot.send_channel_message(f"🚨 <b>CRITICAL LOOP ERROR</b>\n\n{error_msg}\n\nCheck logs immediately!")
-
+                        bot.error_handler.handle_trading_error(e, "ALL", "main_loop_critical")
+                        if bot.telegram_bot:
+                            bot.telegram_bot.send_channel_message(f"🚨 <b>CRITICAL LOOP ERROR</b>\n\n{error_msg}\n\nCheck logs immediately!")
                     print("🔄 Attempting to recover in 1 minute...")
-
                     time.sleep(60)
 
-                    
+        elif mode_choice == "2": # Backtest mode
+            bot.run_backtest_mode(cycles=10) # Example: 10 cycles
+            print("✅ Backtest finished. Exiting.")
+            # Ensure cleanup even after backtest
+            if bot:
+                try:
+                    print("🔌 Stopping WebSocket streams (if running)...")
+                    bot.data_engine.stop()
+                    print("💾 Closing database connection...")
+                    bot.database.close()
+                except Exception as cleanup_e:
+                    print(f"⚠️ Error during backtest cleanup: {cleanup_e}")
 
     except Exception as e:
-
+        # Fatal error handling
         error_msg = f"Fatal error during bot initialization or critical failure: {e}"
-
         print(f"❌ {error_msg}")
-
-        # Use logger if available
-
         if bot and hasattr(bot, 'logger'):
-
-             bot.logger.critical(error_msg, exc_info=True)
-
+            bot.logger.critical(error_msg, exc_info=True)
         else:
-
-             import traceback
-
-             traceback.print_exc()
-
-
+            import traceback
+            traceback.print_exc()
 
         if bot and bot.telegram_bot:
-
             bot.telegram_bot.send_channel_message(f"🚨 <b>FATAL BOT ERROR</b>\n\n{error_msg}\n\nBot will exit.")
-
         print("Bot cannot continue. Exiting.")
-
-        # Attempt graceful shutdown if possible
-
         if bot:
-
             try:
-
+                bot.data_engine.stop() # Attempt WS stop on fatal error too
                 bot.strategy_orchestrator.ml_predictor.save_models()
-
                 bot.database.close()
+            except: pass # Ignore errors during emergency shutdown
 
-            except:
-
-                pass # Ignore errors during emergency shutdown
-
-
-
+# This standard Python construct ensures main() runs when the script is executed directly
 if __name__ == "__main__":
-
     main()
