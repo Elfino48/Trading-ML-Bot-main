@@ -14,6 +14,7 @@ class EnhancedStrategyOrchestrator:
         self.client = bybit_client # Store client if needed elsewhere
         self.data_engine = data_engine # <-- Store data_engine instance
         self.aggressiveness = aggressiveness
+        self.technical_analyzer = EnhancedTechnicalAnalyzer()
         self.error_handler = error_handler
         self.database = database
         self.regime_specific_weights = {}
@@ -21,7 +22,7 @@ class EnhancedStrategyOrchestrator:
         self.portfolio_signals = {}
         self.correlation_matrix = None
         self.asset_volatilities = {}
-        
+
         self._set_aggressiveness_weights()
         
         print(f"🎯 Strategy Orchestrator set to: {self.aggressiveness.upper()} mode")

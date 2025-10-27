@@ -926,8 +926,10 @@ class AdvancedTradingBot:
                     for symbol in SYMBOLS:
                         # Get a COPY of the latest data frame managed by DataEngine
                         data_copy = self.data_engine.get_market_data_for_analysis(symbol)
-                        if data_copy is not None and not data_copy.empty and self.data_engine.validate_market_data(data_copy):
-                            all_symbol_data_copies[symbol] = data_copy
+                        # --- FIX: Reset index ONLY for validation check ---
+                        if data_copy is not None and not data_copy.empty and self.data_engine.validate_market_data(data_copy.reset_index()):
+                        # --- END FIX ---
+                            all_symbol_data_copies[symbol] = data_copy # Store the original indexed copy
                             valid_data_count += 1
                         else:
                             print(f"⚠️ Could not get valid data for {symbol} for this cycle.")
@@ -1699,36 +1701,35 @@ def main():
 
                     # --- Wait for next kline close ---
                     print(f"\n⏰ Waiting for next {TIMEFRAME}m kline close...")
+                    primary_symbol = SYMBOLS[0]
                     while True:
+                        # --- Simplified Timestamp Check ---
                         current_kline_ts = None
-                        # Get latest kline data for a primary symbol (e.g., BTC) to check timestamp
-                        primary_symbol = SYMBOLS[0]
                         latest_data = bot.data_engine.get_market_data_for_analysis(primary_symbol)
 
-                        if latest_data is not None and not latest_data.empty:
-                            # Ensure timestamp column exists before accessing
-                            if 'timestamp' in latest_data.columns:
-                                current_kline_ts = latest_data['timestamp'].iloc[-1]
-                            elif isinstance(latest_data.index, pd.DatetimeIndex): # Check if timestamp is the index
-                                current_kline_ts = latest_data.index[-1]
-
+                        if latest_data is not None and not latest_data.empty and isinstance(latest_data.index, pd.DatetimeIndex):
+                            current_kline_ts = latest_data.index[-1]
+                        # --- End Simplified Check ---
 
                         # Initialize last_kline_timestamp on first run or if it's None
                         if last_kline_timestamp is None and current_kline_ts is not None:
                             last_kline_timestamp = current_kline_ts
                             print(f"   Initial kline timestamp: {last_kline_timestamp}")
 
+                        # Add Debug Print:
+                        print(f"   Checking... Current TS: {current_kline_ts} | Last Cycle TS: {last_kline_timestamp}", end='\r')
+
                         # Check if a new kline has arrived
                         if current_kline_ts is not None and last_kline_timestamp is not None and current_kline_ts > last_kline_timestamp:
+                            print("\n" + " " * 80) # Clear the debug print line
                             print(f"   ✅ New kline detected: {current_kline_ts} (Previous: {last_kline_timestamp})")
                             last_kline_timestamp = current_kline_ts
                             break # Exit wait loop and run trading cycle
+
+                        time.sleep(5) # Check every 5 seconds
                         # else:
                             # Optional: Print waiting status periodically
                             # print(f"   Waiting... Current TS: {current_kline_ts}", end='\r')
-
-                        # Wait briefly before checking again
-                        time.sleep(5) # Check every 5 seconds
                     # --- End Wait Logic ---
 
                     # Now run the cycle using the data updated by WebSocket
