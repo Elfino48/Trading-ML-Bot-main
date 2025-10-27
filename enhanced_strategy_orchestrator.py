@@ -1,3 +1,4 @@
+import logging
 from enhanced_technical_analyzer import EnhancedTechnicalAnalyzer
 from ml_predictor import MLPredictor
 from advanced_risk_manager import AdvancedRiskManager
@@ -11,8 +12,8 @@ class EnhancedStrategyOrchestrator:
     def __init__(self, bybit_client, data_engine: DataEngine, aggressiveness: str = "conservative", error_handler=None, database=None):
         self.ml_predictor = MLPredictor(error_handler, database)
         self.risk_manager = AdvancedRiskManager(bybit_client, aggressiveness)
-        self.client = bybit_client # Store client if needed elsewhere
-        self.data_engine = data_engine # <-- Store data_engine instance
+        self.client = bybit_client 
+        self.data_engine = data_engine 
         self.aggressiveness = aggressiveness
         self.technical_analyzer = EnhancedTechnicalAnalyzer()
         self.error_handler = error_handler
@@ -23,10 +24,99 @@ class EnhancedStrategyOrchestrator:
         self.correlation_matrix = None
         self.asset_volatilities = {}
 
+        self._setup_cycle_logger() 
         self._set_aggressiveness_weights()
         
         print(f"🎯 Strategy Orchestrator set to: {self.aggressiveness.upper()} mode")
     
+    def _setup_cycle_logger(self):
+            self.cycle_logger = logging.getLogger('CycleDetailsLogger')
+            self.cycle_logger.setLevel(logging.INFO)
+            
+            self.cycle_logger.propagate = False 
+            
+            if not self.cycle_logger.hasHandlers():
+                file_handler = logging.FileHandler('cycle_details.log', mode='a')
+                file_handler.setLevel(logging.INFO)
+                
+                formatter = logging.Formatter('%(message)s')
+                file_handler.setFormatter(formatter)
+                
+                self.cycle_logger.addHandler(file_handler)
+            
+            print("📝 Cycle detail logger initialized (logs to cycle_details.log)")
+
+    def _log_cycle_details(self, decision: Dict):
+            try:
+                log_entry = []
+                log_entry.append(f"============================================================")
+                log_entry.append(f"CYCLE DECISION LOG: {decision['symbol']}")
+                log_entry.append(f"Timestamp: {decision.get('timestamp')}")
+                log_entry.append(f"Aggressiveness: {decision.get('aggressiveness', 'N/A')}")
+                log_entry.append(f"------------------------------------------------------------")
+
+                log_entry.append(f"[DECISION]")
+                log_entry.append(f"Action: {decision.get('action', 'N/A')}")
+                log_entry.append(f"Final Confidence: {decision.get('confidence', 0):.2f}%")
+                log_entry.append(f"Composite Score: {decision.get('composite_score', 0):.4f}")
+                log_entry.append(f"Trade Quality: {decision.get('trade_quality', {}).get('quality_rating', 'N/A')} ({decision.get('trade_quality', {}).get('quality_score', 0)})")
+
+                log_entry.append(f"\n[SCORE BREAKDOWN]")
+                log_entry.append(f"  - Trend Score:      {decision.get('trend_score', 0):.4f}")
+                log_entry.append(f"  - Mean Rev Score:   {decision.get('mr_score', 0):.4f}")
+                log_entry.append(f"  - Breakout Score:   {decision.get('breakout_score', 0):.4f}")
+                log_entry.append(f"  - MTF Score:        {decision.get('mtf_score', 0):.4f}")
+                log_entry.append(f"  - ML Score:         {decision.get('ml_score', 0):.4f}")
+
+                ml_pred = decision.get('ml_prediction', {})
+                log_entry.append(f"\n[ML PREDICTOR DETAILS]")
+                log_entry.append(f"  - ML Raw Prediction: {ml_pred.get('raw_prediction', 0)} (This is scaled to ML Score)")
+                log_entry.append(f"  - ML Model Confidence: {ml_pred.get('confidence', 0) * 100:.2f}% (This boosts Final Confidence)")
+                log_entry.append(f"  - ML (RF) Pred: {ml_pred.get('rf_pred', 'N/A')} | Conf: {ml_pred.get('rf_confidence', 0) * 100:.2f}%")
+                log_entry.append(f"  - ML (GB) Pred: {ml_pred.get('gb_pred', 'N/A')} | Conf: {ml_pred.get('gb_confidence', 0) * 100:.2f}%")
+
+                # --- NEW SECTION FOR RAW INDICATORS ---
+                indicators = decision.get('technical_indicators', {})
+                if indicators:
+                    log_entry.append(f"\n[TECHNICAL INDICATORS (Raw Values)]")
+                    # Sort indicators alphabetically for consistent logging
+                    sorted_indicators = sorted(indicators.items())
+                    for key, value in sorted_indicators:
+                        # Format floats nicely, leave others as is
+                        if isinstance(value, (float, np.float64)):
+                            log_entry.append(f"  - {key:<25}: {value:.4f}")
+                        else:
+                            log_entry.append(f"  - {key:<25}: {value}")
+                # --- END NEW SECTION ---
+
+                log_entry.append(f"\n[CONTEXT & RISK]")
+                log_entry.append(f"Market Regime: {decision.get('market_regime', 'N/A')}")
+                log_entry.append(f"Volatility Regime: {decision.get('volatility_regime', 'N/A')}")
+                log_entry.append(f"Analysis Price (Kline Close): {decision.get('analysis_price', 0):.4f}")
+                log_entry.append(f"Latest Price (For Execution): {decision.get('current_price', 0):.4f}")
+                log_entry.append(f"Proposed Size: ${decision.get('position_size', 0):.2f}")
+                log_entry.append(f"Stop Loss: ${decision.get('stop_loss', 0):.4f}")
+                log_entry.append(f"Take Profit: ${decision.get('take_profit', 0):.4f}")
+
+                if decision.get('analysis_error'): # Use .get() for safety
+                    log_entry.append(f"\n[ANALYSIS ERROR]")
+                    log_entry.append(f"Error: {decision['analysis_error']}")
+
+                log_entry.append(f"============================================================\n")
+
+                self.cycle_logger.info("\n".join(log_entry))
+
+            except Exception as e:
+                # Use logger if available, otherwise print
+                log_func = getattr(self, 'cycle_logger', None)
+                if log_func and hasattr(log_func, 'error'):
+                    log_func.error(f"--- FAILED TO LOG CYCLE DETAILS --- \n{str(e)}\n")
+                else:
+                    print(f"❌ Error in _log_cycle_details (logging failed): {e}")
+
+                # Also print to console as a fallback
+                print(f"❌ Error in _log_cycle_details: {e}")
+
     def set_error_handler(self, error_handler):
         self.error_handler = error_handler
         self.ml_predictor.set_error_handler(error_handler)
@@ -536,10 +626,7 @@ class EnhancedStrategyOrchestrator:
             return 0.5
     
     def analyze_symbol(self, symbol: str, historical_data: pd.DataFrame, portfolio_value: float) -> Dict:
-            """Analyzes a symbol using the appropriate aggressiveness level."""
-            # This method now primarily delegates, ensuring aggressiveness is passed
             try:
-                # Pass the currently set aggressiveness level
                 return self.analyze_symbol_aggressive(symbol, historical_data, portfolio_value, self.aggressiveness)
             except Exception as e:
                 error_msg = f"Error analyzing symbol {symbol}: {e}"
@@ -548,11 +635,11 @@ class EnhancedStrategyOrchestrator:
                 if self.error_handler:
                     self.error_handler.handle_trading_error(e, symbol, "analysis")
 
-                # Fallback structure (consistent with analyze_symbol_aggressive)
                 analysis_price = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
-                return {
+                
+                fallback_decision = {
                     'symbol': symbol,
-                    'current_price': analysis_price, # Use analysis price for fallback consistency
+                    'current_price': analysis_price, 
                     'action': 'HOLD',
                     'confidence': 0,
                     'composite_score': 0,
@@ -572,43 +659,67 @@ class EnhancedStrategyOrchestrator:
                     'timestamp': pd.Timestamp.now(),
                     'analysis_error': str(e)
                 }
-    
+                self._log_cycle_details(fallback_decision)
+                
+                return fallback_decision
+            
     def analyze_symbol_aggressive(self, symbol: str, historical_data: pd.DataFrame,
-                                        portfolio_value: float, aggressiveness: str = None) -> Dict:
+                                            portfolio_value: float, aggressiveness: str = None) -> Dict:
 
                 if aggressiveness is None:
                     aggressiveness = self.aggressiveness
+
+                # --- Initialize fallback decision structure early ---
+                analysis_price_fallback = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
+                fallback_decision = {
+                    'symbol': symbol,
+                    'current_price': analysis_price_fallback,
+                    'action': 'HOLD', 'confidence': 0, 'composite_score': 0,
+                    'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
+                    'position_size': 0, 'quantity': 0, 'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0,
+                    'signals': {}, 'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0},
+                    'market_regime': 'neutral', 'volatility_regime': 'normal',
+                    'aggressiveness': aggressiveness or self.aggressiveness,
+                    'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
+                    'market_context': {}, 'timestamp': pd.Timestamp.now(),
+                    'technical_indicators': {}, # Add empty dict for indicators in fallback
+                    'analysis_error': None
+                }
+                # --- End fallback init ---
 
                 try:
                     if historical_data is None or len(historical_data) < 100:
                         raise ValueError(f"Insufficient historical data for {symbol}")
 
-                    # --- Analysis Phase (using historical data) ---
-                    analysis_price = historical_data['close'].iloc[-1] # Price at the time of analysis trigger (kline close)
+                    analysis_price = historical_data['close'].iloc[-1]
+                    # --- Store the full indicators dictionary ---
                     indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
+                    if not indicators: # Handle case where indicator calculation fails
+                        raise ValueError(f"Technical indicator calculation failed for {symbol}")
+                    # --- End store indicators ---
+
                     signals = self.technical_analyzer.generate_enhanced_signals(indicators)
                     ml_result = self.ml_predictor.predict(symbol, historical_data)
-                    atr = indicators.get('atr', analysis_price * 0.02) # Use analysis price for ATR context
+                    atr = indicators.get('atr', analysis_price * 0.02)
                     mtf_signals = self._multi_timeframe_analysis(historical_data)
 
                     score_results = self._calculate_aggressive_composite_score(signals, ml_result, mtf_signals, aggressiveness)
                     composite_score = score_results['composite_score']
                     action, confidence = self._determine_aggressive_action(composite_score, signals, ml_result, aggressiveness)
 
-                    # --- Pre-Execution/Risk Phase (using LATEST price) ---
-                    # Fetch the most current price right before risk calculations
                     latest_price = self.data_engine.get_current_price(symbol)
                     if latest_price <= 0:
-                        # Handle case where latest price fetch failed
-                        self.logger.warning(f"Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
+                        # Use self.logger if available, otherwise print
+                        log_func = getattr(self, 'logger', None)
+                        if log_func and hasattr(log_func, 'warning'):
+                            log_func.warning(f"Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
+                        else:
+                            print(f"⚠️ Warning: Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
+
                         if self.error_handler:
                             self.error_handler.handle_data_error(Exception("Failed to get latest price"), "analyze_symbol_risk", symbol)
-                        latest_price = analysis_price # Fallback
+                        latest_price = analysis_price
 
-                    # Update ATR based on latest price if significantly different (optional, depends on strategy)
-                    # atr = indicators.get('atr', latest_price * 0.02) # Or keep ATR based on analysis candle
-
-                    # Use LATEST price for sizing and SL/TP calculations
                     position_info = self.risk_manager.calculate_aggressive_position_size(
                         symbol, confidence, latest_price, atr, portfolio_value, aggressiveness
                     )
@@ -616,22 +727,18 @@ class EnhancedStrategyOrchestrator:
                     volatility_regime = 'high' if indicators.get('atr_percent', 0) > 3 else 'low' if indicators.get('atr_percent', 0) < 1 else 'normal'
 
                     sl_tp_levels = {}
-                    if action != 'HOLD': # Calculate SL/TP only if an action is decided
+                    if action != 'HOLD':
                         sl_tp_levels = self.risk_manager.calculate_aggressive_stop_loss(
-                            symbol, action, latest_price, atr, aggressiveness # Use LATEST price here
+                            symbol, action, latest_price, atr, aggressiveness
                         )
                     else:
-                        # Provide default zero values if HOLD
                         sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
 
-                    # --- Post-Analysis ---
                     trade_quality = self._assess_trade_quality(indicators, signals, ml_result, action)
-                    market_context = self._analyze_market_context(indicators, historical_data) # Context based on analysis candle
+                    market_context = self._analyze_market_context(indicators, historical_data)
 
-                    # --- Construct Final Decision ---
                     decision = {
                         'symbol': symbol,
-                        # IMPORTANT: Use LATEST_PRICE for execution reference
                         'current_price': latest_price,
                         'action': action,
                         'confidence': confidence,
@@ -642,24 +749,28 @@ class EnhancedStrategyOrchestrator:
                         'ml_score': score_results['ml_score'],
                         'mtf_score': score_results['mtf_score'],
                         'position_size': position_info['size_usdt'],
-                        'quantity': position_info['quantity'], # Quantity based on LATEST price
-                        'stop_loss': sl_tp_levels['stop_loss'], # SL based on LATEST price
-                        'take_profit': sl_tp_levels['take_profit'], # TP based on LATEST price
+                        'quantity': position_info['quantity'],
+                        'stop_loss': sl_tp_levels['stop_loss'],
+                        'take_profit': sl_tp_levels['take_profit'],
                         'risk_reward_ratio': sl_tp_levels['risk_reward_ratio'],
-                        'signals': signals, # Signals derived from historical data
-                        'ml_prediction': ml_result, # ML derived from historical data
+                        'signals': signals, # Contains processed signal scores
+                        'ml_prediction': ml_result,
                         'market_regime': indicators.get('market_regime', 'neutral'),
                         'volatility_regime': volatility_regime,
                         'aggressiveness': aggressiveness,
                         'trade_quality': trade_quality,
                         'market_context': market_context,
                         'timestamp': pd.Timestamp.now(),
-                        'analysis_price': analysis_price # Optionally include the price analysis was based on
+                        'analysis_price': analysis_price,
+                        'technical_indicators': indicators # <-- ADDED: Store raw indicators
                     }
 
+                    self._log_cycle_details(decision) # Log the complete decision
+
                     if self.database and action != 'HOLD':
-                        db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality']}
+                        db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality', 'technical_indicators']} # Exclude raw indicators from DB event too
                         self.database.store_system_event("TRADING_DECISION", db_event_data, "INFO", "Strategy Analysis")
+
 
                     return decision
 
@@ -670,30 +781,12 @@ class EnhancedStrategyOrchestrator:
                     if self.error_handler:
                         self.error_handler.handle_trading_error(e, symbol, "aggressive_analysis")
 
-                    # Ensure fallback uses a valid price, preferably analysis price if available
-                    analysis_price = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
-                    return {
-                        'symbol': symbol,
-                        'current_price': analysis_price, # Fallback uses analysis price
-                        'action': 'HOLD',
-                        'confidence': 0,
-                        'composite_score': 0,
-                        'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
-                        'position_size': 0,
-                        'quantity': 0,
-                        'stop_loss': 0,
-                        'take_profit': 0,
-                        'risk_reward_ratio': 0,
-                        'signals': {},
-                        'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0},
-                        'market_regime': 'neutral',
-                        'volatility_regime': 'normal',
-                        'aggressiveness': aggressiveness or self.aggressiveness,
-                        'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
-                        'market_context': {},
-                        'timestamp': pd.Timestamp.now(),
-                        'analysis_error': str(e)
-                    }
+                    # Update fallback with error and log it
+                    fallback_decision['analysis_error'] = str(e)
+                    fallback_decision['timestamp'] = pd.Timestamp.now() # Update timestamp for error
+                    self._log_cycle_details(fallback_decision)
+
+                    return fallback_decision
     
     def calculate_dynamic_weights(self, market_regime: str, volatility: float, recent_performance: dict, aggressiveness: str) -> Dict[str, float]:
         
@@ -1082,66 +1175,70 @@ class EnhancedStrategyOrchestrator:
             return 0
 
     def _determine_aggressive_action(self, composite_score: float, signals: Dict, ml_result: Dict, aggressiveness: str) -> tuple:
-        try:
-            if aggressiveness == "conservative":
-                buy_threshold = 20
-                sell_threshold = -20
-                strong_threshold = 40
-                confidence_boost_factor = 0.5
-                strong_signal_boost = 1.2
-            elif aggressiveness == "moderate":
-                buy_threshold = 15
-                sell_threshold = -15
-                strong_threshold = 30
-                confidence_boost_factor = 0.6
-                strong_signal_boost = 1.3
-            elif aggressiveness == "aggressive":
-                buy_threshold = 10
-                sell_threshold = -10
-                strong_threshold = 25
-                confidence_boost_factor = 0.7
-                strong_signal_boost = 1.4
-            elif aggressiveness == "high":
-                buy_threshold = 5
-                sell_threshold = -5
-                strong_threshold = 20
-                confidence_boost_factor = 0.8
-                strong_signal_boost = 1.5
-            else:
-                buy_threshold = 20
-                sell_threshold = -20
-                strong_threshold = 40
-                confidence_boost_factor = 0.5
-                strong_signal_boost = 1.2
-            
-            ml_confidence = ml_result.get('confidence', 0)
-            confidence_boost = ml_confidence * confidence_boost_factor
-            
-            if composite_score >= buy_threshold:
-                action = 'BUY'
-                base_confidence = composite_score
-            elif composite_score <= sell_threshold:
-                action = 'SELL' 
-                base_confidence = abs(composite_score)
-            else:
-                action = 'HOLD'
-                base_confidence = 0
-            
-            confidence = min(100, base_confidence + confidence_boost)
-            
-            if abs(composite_score) >= strong_threshold:
-                confidence = min(100, confidence * strong_signal_boost)
+            try:
+                if aggressiveness == "conservative":
+                    buy_threshold = 20
+                    sell_threshold = -20
+                    strong_threshold = 40
+                    confidence_boost_factor = 0.5
+                    strong_signal_boost = 1.2
+                elif aggressiveness == "moderate":
+                    buy_threshold = 15
+                    sell_threshold = -15
+                    strong_threshold = 30
+                    confidence_boost_factor = 0.6
+                    strong_signal_boost = 1.3
+                elif aggressiveness == "aggressive":
+                    buy_threshold = 10
+                    sell_threshold = -10
+                    strong_threshold = 25
+                    confidence_boost_factor = 0.7
+                    strong_signal_boost = 1.4
+                elif aggressiveness == "high":
+                    buy_threshold = 5
+                    sell_threshold = -5
+                    strong_threshold = 20
+                    confidence_boost_factor = 0.8
+                    strong_signal_boost = 1.5
+                else:
+                    buy_threshold = 20
+                    sell_threshold = -20
+                    strong_threshold = 40
+                    confidence_boost_factor = 0.5
+                    strong_signal_boost = 1.2
                 
-            if aggressiveness in ["aggressive", "high"] and action != 'HOLD':
-                if 20 <= abs(composite_score) <= 40:
-                    confidence = min(100, confidence * 1.1)
-            
-            return action, confidence
-            
-        except Exception as e:
-            if self.error_handler:
-                self.error_handler.handle_trading_error(e, "ALL", "determine_action")
-            return 'HOLD', 0
+                ml_confidence = ml_result.get('confidence', 0)
+                
+                # --- THIS IS THE FIX ---
+                # Scale ML confidence (0.0-1.0) to the 0-100 scale of the composite score
+                confidence_boost = (ml_confidence * 100) * confidence_boost_factor
+                # --- END FIX ---
+                
+                if composite_score >= buy_threshold:
+                    action = 'BUY'
+                    base_confidence = composite_score
+                elif composite_score <= sell_threshold:
+                    action = 'SELL' 
+                    base_confidence = abs(composite_score)
+                else:
+                    action = 'HOLD'
+                    base_confidence = 0
+                
+                confidence = min(100, base_confidence + confidence_boost)
+                
+                if abs(composite_score) >= strong_threshold:
+                    confidence = min(100, confidence * strong_signal_boost)
+                    
+                if aggressiveness in ["aggressive", "high"] and action != 'HOLD':
+                    if 20 <= abs(composite_score) <= 40:
+                        confidence = min(100, confidence * 1.1)
+                
+                return action, confidence
+                
+            except Exception as e:
+                if self.error_handler:
+                    self.error_handler.handle_trading_error(e, "ALL", "determine_action")
+                return 'HOLD', 0
 
     def _assess_trade_quality(self, indicators: Dict, signals: Dict, ml_result: Dict, action: str) -> Dict:
         try:
