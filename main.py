@@ -560,7 +560,7 @@ class AdvancedTradingBot:
 
                     if len(historical_data) >= 200: # Need enough for lookbacks + min_samples
 
-                        if self.data_engine.validate_market_data(historical_data):
+                        if self.data_engine.validate_market_data(historical_data.reset_index()):
 
                             self.logger.info(f"[DEBUG] Data validated for {symbol}. Calling train_model...")
 

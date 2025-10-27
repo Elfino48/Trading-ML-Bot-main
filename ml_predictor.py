@@ -244,7 +244,7 @@ class MLPredictor:
             future_return = (future_price - current_price) / current_price
             
             # Dynamic threshold based on recent volatility
-            volatility = df['close'].pct_change().rolling(20).std().iloc[current_idx]
+            volatility = df['close'].pct_change().rolling(20).std().iloc[current_idx - 1]
             threshold = max(0.015, volatility * threshold_multiplier)
             
             if future_return > threshold:
