@@ -56,8 +56,14 @@ class ErrorHandler:
         Returns:
             Dict with handling results and retry instructions
         """
-        self.error_count += 1
-        self.api_error_count += 1
+
+        is_websocket_error = context and context.startswith("ws_")
+
+        if not is_websocket_error:
+            self.error_count += 1
+            self.api_error_count += 1
+        else:
+            print(f"ℹ️ Ignoring WebSocket error for emergency count: {error} in {context}") # Optional logging
         
         error_info = {
             'timestamp': datetime.now(),

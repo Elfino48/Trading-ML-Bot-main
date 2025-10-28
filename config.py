@@ -23,7 +23,7 @@ TELEGRAM_CONFIG = {
 }
 
 # Trading Parameters
-SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT").split(",")
+SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT").split(",")
 TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "15")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 

@@ -3,74 +3,154 @@ import threading
 import time
 import numpy as np
 import pandas as pd
-from typing import Dict, List
+from typing import Dict, List, Optional # Added Optional
+from decimal import Decimal, ROUND_DOWN # Import Decimal for precision
 from bybit_client import BybitClient
 from advanced_risk_manager import AdvancedRiskManager
 from config import SYMBOLS
 
 class ExecutionEngine:
     def __init__(self, bybit_client: BybitClient, risk_manager: AdvancedRiskManager):
+            self.logger = logging.getLogger('ExecutionEngine')
             self.client = bybit_client
             self.risk_manager = risk_manager
-            # Use a dictionary for open orders: {order_id: {details}}
             self.open_orders: Dict[str, Dict] = {}
-            # Internal position cache updated by WS: {symbol: {details}}
             self.position_cache: Dict[str, Dict] = {}
-            self.trade_history = [] # Consider moving primary history to DB
-            self.emergency_protocols = None # Must be set via set_emergency_protocols
-            self.position_timeout = 30 # Timeout for verification
-            self.max_retry_attempts = 3 # Max retries for placing orders
+            self.trade_history = []
+            self.emergency_protocols = None
+            self.position_timeout = 30
+            self.max_retry_attempts = 3
             self.execution_quality_log = []
 
-            # --- Dependencies for advanced execution ---
-            # Assuming these classes are defined elsewhere in the file or imported
+            # --- Add Instrument Info Cache ---
+            self.instrument_info_cache: Dict[str, Dict] = {}
+            self.instrument_info_lock = threading.Lock()
+            self._fetch_initial_instrument_info() # Fetch rules at startup
+            # --- End Add ---
+
             self.market_impact_model = MarketImpactModel()
             self.limit_order_strategies = LimitOrderStrategies()
             self.vwap_executor = VWAPExecutor(bybit_client)
             self.twap_executor = TWAPExecutor(bybit_client)
             self.smart_router = SmartOrderRouter(bybit_client)
-            # --- End Dependencies ---
 
-            self._state_lock = threading.Lock() # Lock for thread-safe updates to open_orders and position_cache
-            self.logger = logging.getLogger('ExecutionEngine')
+            self._state_lock = threading.Lock()
 
-            # Initialize position cache via REST
             self._initialize_position_cache()
-            
+
+    # --- New Method: Fetch and Cache Instrument Info ---
+    def _fetch_initial_instrument_info(self):
+        """Fetches and caches instrument rules at startup."""
+        self.logger.info("Fetching initial instrument information...")
+        try:
+            with self.instrument_info_lock:
+                # Assuming linear perpetual contracts
+                params = {"category": "linear"}
+                response = self.client._request("GET", "/v5/market/instruments-info", params)
+
+                if response and response.get('retCode') == 0:
+                    instruments = response['result'].get('list', [])
+                    count = 0
+                    for instrument in instruments:
+                        symbol = instrument.get('symbol')
+                        if symbol in SYMBOLS: # Only cache symbols we trade
+                            lot_size_filter = instrument.get('lotSizeFilter', {})
+                            price_filter = instrument.get('priceFilter', {})
+                            self.instrument_info_cache[symbol] = {
+                                'minOrderQty': Decimal(lot_size_filter.get('minOrderQty', '0')),
+                                'maxOrderQty': Decimal(lot_size_filter.get('maxOrderQty', '1000000')),
+                                'qtyStep': Decimal(lot_size_filter.get('qtyStep', '0.001')), # Qty precision
+                                'minPrice': Decimal(price_filter.get('minPrice', '0')),
+                                'maxPrice': Decimal(price_filter.get('maxPrice', '1000000')),
+                                'tickSize': Decimal(price_filter.get('tickSize', '0.01')) # Price precision
+                            }
+                            count += 1
+                    self.logger.info(f"Cached instrument info for {count}/{len(SYMBOLS)} symbols.")
+                else:
+                    err = response.get('retMsg', 'Unknown error') if response else 'No response'
+                    self.logger.error(f"Failed to fetch instrument info: {err}")
+
+        except Exception as e:
+            self.logger.error(f"Error fetching initial instrument info: {e}", exc_info=True)
+            # You might want to retry or handle this failure more robustly
+
+    # --- New Method: Get Instrument Info (Handles Cache Miss) ---
+    def get_instrument_info(self, symbol: str) -> Optional[Dict]:
+        """Gets instrument info from cache, fetches if missing."""
+        with self.instrument_info_lock:
+            info = self.instrument_info_cache.get(symbol)
+
+        if info:
+            return info
+        else:
+            # Attempt to fetch missing info
+            self.logger.warning(f"Instrument info for {symbol} not in cache, attempting fetch...")
+            try:
+                params = {"category": "linear", "symbol": symbol}
+                response = self.client._request("GET", "/v5/market/instruments-info", params)
+                if response and response.get('retCode') == 0:
+                    instruments = response['result'].get('list', [])
+                    if instruments:
+                        instrument = instruments[0]
+                        lot_size_filter = instrument.get('lotSizeFilter', {})
+                        price_filter = instrument.get('priceFilter', {})
+                        new_info = {
+                            'minOrderQty': Decimal(lot_size_filter.get('minOrderQty', '0')),
+                            'maxOrderQty': Decimal(lot_size_filter.get('maxOrderQty', '1000000')),
+                            'qtyStep': Decimal(lot_size_filter.get('qtyStep', '0.001')),
+                            'minPrice': Decimal(price_filter.get('minPrice', '0')),
+                            'maxPrice': Decimal(price_filter.get('maxPrice', '1000000')),
+                            'tickSize': Decimal(price_filter.get('tickSize', '0.01'))
+                        }
+                        with self.instrument_info_lock:
+                            self.instrument_info_cache[symbol] = new_info
+                        self.logger.info(f"Fetched and cached missing instrument info for {symbol}.")
+                        return new_info
+                    else:
+                        self.logger.error(f"API returned no instrument info for {symbol} on fetch attempt.")
+                        return None
+                else:
+                    err = response.get('retMsg', 'Unknown error') if response else 'No response'
+                    self.logger.error(f"Failed to fetch missing instrument info for {symbol}: {err}")
+                    return None
+            except Exception as e:
+                self.logger.error(f"Error fetching missing instrument info for {symbol}: {e}", exc_info=True)
+                return None
+
     def set_emergency_protocols(self, emergency_protocols):
         self.emergency_protocols = emergency_protocols
 
     def _initialize_position_cache(self):
-            """Populates the initial position cache using REST API."""
-            self.logger.info("Initializing position cache via REST...")
-            try:
-                # Use the client's method directly
-                pos_response = self.client.get_position_info()
-                if pos_response and pos_response.get('retCode') == 0:
-                    with self._state_lock:
-                        self.position_cache.clear() # Clear existing before refresh
-                        count = 0
-                        for pos in pos_response['result'].get('list', []):
-                            symbol = pos.get('symbol')
-                            size = float(pos.get('size', 0))
-                            # Only cache if symbol exists and size > 0? Or cache all? Cache non-zero for relevance.
-                            if symbol and size > 0:
-                                self.position_cache[symbol] = {
-                                    'size': size,
-                                    'side': pos.get('side'),
-                                    'avgPrice': float(pos.get('avgPrice', 0)),
-                                    'positionValue': float(pos.get('positionValue', 0)),
-                                    'unrealisedPnl': float(pos.get('unrealisedPnl', 0)),
-                                    'liqPrice': float(pos.get('liqPrice', 0)),
-                                    'updatedTime': int(pos.get('updatedTime', time.time()*1000)) # Store Bybit's timestamp
-                                }
-                                count += 1
-                        self.logger.info(f"Initialized position cache with {count} open positions.")
-                else:
-                    err_msg = pos_response.get('retMsg', 'No response') if pos_response else 'No response'
-                    self.logger.error(f"Failed to initialize position cache via REST: {err_msg}")
-            except Exception as e:
-                self.logger.error(f"Error initializing position cache: {e}", exc_info=True)
+        """Populates the initial position cache using REST API."""
+        self.logger.info("Initializing position cache via REST...")
+        try:
+            # Use the client's method directly
+            pos_response = self.client.get_position_info(category="linear")
+            if pos_response and pos_response.get('retCode') == 0:
+                with self._state_lock:
+                    self.position_cache.clear() # Clear existing before refresh
+                    count = 0
+                    for pos in pos_response['result'].get('list', []):
+                        symbol = pos.get('symbol')
+                        size = float(pos.get('size', 0))
+                        # Only cache if symbol exists and size > 0? Or cache all? Cache non-zero for relevance.
+                        if symbol and size > 0:
+                            self.position_cache[symbol] = {
+                                'size': size,
+                                'side': pos.get('side'),
+                                'avgPrice': float(pos.get('avgPrice', 0)),
+                                'positionValue': float(pos.get('positionValue', 0)),
+                                'unrealisedPnl': float(pos.get('unrealisedPnl', 0)),
+                                'liqPrice': float(pos.get('liqPrice', 0)),
+                                'updatedTime': int(pos.get('updatedTime', time.time()*1000)) # Store Bybit's timestamp
+                            }
+                            count += 1
+                    self.logger.info(f"Initialized position cache with {count} open positions.")
+            else:
+                err_msg = pos_response.get('retMsg', 'No response') if pos_response else 'No response'
+                self.logger.error(f"Failed to initialize position cache via REST: {err_msg}")
+        except Exception as e:
+            self.logger.error(f"Error initializing position cache: {e}", exc_info=True)
 
     def handle_private_ws_message(self, message: Dict):
             """Processes private WebSocket messages (orders, positions). MUST be called from WS thread."""
@@ -792,7 +872,6 @@ class ExecutionEngine:
             try:
                 # Re-validate just before execution
                 if not self._validate_trade_decision(decision):
-                    # Validation error already logged inside _validate_trade_decision
                     return {'success': False, 'message': 'Trade validation failed before execution'}
 
                 symbol = decision['symbol']
@@ -808,12 +887,10 @@ class ExecutionEngine:
                     return {'success': False, 'message': 'Emergency mode active - trading suspended'}
 
                 position_size_usdt = decision['position_size']
-                quantity = decision['quantity']
-                # Price used for risk checks/logging, actual execution is Market
+                quantity_initial = decision['quantity'] # Calculated quantity before adjustments
                 current_price_at_decision = decision['current_price']
 
                 # --- Risk Check ---
-                # Pass None for market_data initially, risk manager can fetch if needed
                 risk_approval = self.risk_manager.can_trade(symbol, position_size_usdt, market_data=None)
                 if not risk_approval.get('approved'):
                     reason = risk_approval.get('reason', 'No reason specified')
@@ -823,36 +900,55 @@ class ExecutionEngine:
                 # --- Adjust Size if Necessary ---
                 adjusted_size = risk_approval.get('adjusted_size', position_size_usdt)
                 if adjusted_size != position_size_usdt:
-                    # Check if adjustment makes size/qty invalid
                     if adjusted_size <= 0:
                         self.logger.warning(f"Risk adjustment resulted in non-positive size (${adjusted_size:.2f}) for {symbol}. Skipping trade.")
                         return {'success': False, 'message': f'Risk adjustment resulted in non-positive size (${adjusted_size:.2f})'}
 
                     position_size_usdt = adjusted_size
                     if current_price_at_decision > 0:
-                        # Recalculate quantity based on adjusted size and original decision price
-                        quantity = position_size_usdt / current_price_at_decision
-                        # Apply appropriate rounding based on symbol specs (e.g., 3 decimals for BTC)
-                        # This needs refinement based on actual exchange minimums/precision
-                        quantity = round(quantity, 3 if 'BTC' in symbol else 2 if 'ETH' in symbol else 1) # Example rounding
-                        self.logger.info(f"Adjusted trade size for {symbol} to ${position_size_usdt:.2f} ({quantity} units) due to risk rules: {risk_approval.get('reason', '')}")
+                        # Recalculate quantity based on adjusted size
+                        quantity_initial = position_size_usdt / current_price_at_decision
+                        self.logger.info(f"Adjusted trade size for {symbol} to ${position_size_usdt:.2f} ({quantity_initial:.8f} units initially) due to risk rules: {risk_approval.get('reason', '')}")
                     else:
                         self.logger.error(f"Cannot calculate adjusted quantity for {symbol}: decision price is zero.")
                         return {'success': False, 'message': 'Cannot calculate quantity with zero price after risk adjustment.'}
 
-                # --- Final Quantity Check ---
-                # Add check for minimum order size if known (needs exchange info)
-                min_order_qty = 0.001 # Example for BTC
-                if quantity < min_order_qty:
-                    self.logger.warning(f"Skipping trade for {symbol}: Final quantity {quantity} is below minimum {min_order_qty}.")
-                    return {'success': False, 'message': f'Final quantity {quantity} is below minimum order size {min_order_qty}'}
+                # --- Get Instrument Rules ---
+                instrument_info = self.get_instrument_info(symbol)
+                if not instrument_info:
+                    self.logger.error(f"Could not get instrument rules for {symbol}. Skipping trade.")
+                    return {'success': False, 'message': f'Failed to get instrument rules for {symbol}'}
 
-                # --- Log Intent ---
+                min_qty = instrument_info['minOrderQty']
+                qty_step = instrument_info['qtyStep']
+                adjusted_quantity_decimal = Decimal(str(quantity_initial)) # Use Decimal for precision
+
+                # --- Apply Instrument Rules ---
+                if adjusted_quantity_decimal < min_qty:
+                    self.logger.warning(f"Skipping trade for {symbol}: Initial quantity {adjusted_quantity_decimal} is below minimum {min_qty}.")
+                    return {'success': False, 'message': f'Initial quantity {adjusted_quantity_decimal} below minimum {min_qty}'}
+
+                # Round DOWN to the nearest qtyStep
+                # quantize(Decimal('0'), ROUND_DOWN) removes digits beyond the step's precision
+                adjusted_quantity_decimal = (adjusted_quantity_decimal / qty_step).quantize(Decimal('0'), ROUND_DOWN) * qty_step
+
+                # Final check after rounding
+                if adjusted_quantity_decimal < min_qty:
+                    self.logger.warning(f"Skipping trade for {symbol}: Adjusted quantity {adjusted_quantity_decimal} is below minimum {min_qty} after step rounding.")
+                    return {'success': False, 'message': f'Adjusted quantity {adjusted_quantity_decimal} below minimum {min_qty}'}
+
+                # Convert final quantity back to float or string as needed by API client
+                final_quantity_str = str(adjusted_quantity_decimal)
+                final_quantity_float = float(adjusted_quantity_decimal)
+                # Recalculate approximate USDT size based on final quantity
+                final_size_usdt = final_quantity_float * current_price_at_decision
+
+                # --- Log Intent with Final Quantity ---
                 self.logger.info(f"🎯 Attempting Enhanced {action} for {symbol}")
-                self.logger.info(f"   📊 Quantity: {quantity:.4f} units (${position_size_usdt:.2f})")
+                self.logger.info(f"   📊 Final Quantity: {final_quantity_str} units (~${final_size_usdt:.2f})") # Log final quantity
                 self.logger.info(f"   🛡️ Stop Loss: ${decision['stop_loss']:.2f}")
                 self.logger.info(f"   🎯 Take Profit: ${decision['take_profit']:.2f}")
-                self.logger.info(f"   ⚖️ Risk/Reward: {decision.get('risk_reward_ratio', 0):.2f}:1") # Use get with default
+                self.logger.info(f"   ⚖️ Risk/Reward: {decision.get('risk_reward_ratio', 0):.2f}:1")
                 self.logger.info(f"   📈 Confidence: {decision.get('confidence', 0):.1f}%")
                 self.logger.info(f"   🌡️ Market Regime: {decision.get('market_regime', 'N/A')}")
 
@@ -860,15 +956,15 @@ class ExecutionEngine:
                 stop_loss = decision['stop_loss']
                 take_profit = decision['take_profit']
 
-                market_impact = self.market_impact_model.estimate_impact(symbol, quantity, side)
+                market_impact = self.market_impact_model.estimate_impact(symbol, final_quantity_float, side) # Use final float qty
 
                 # --- Place Order ---
                 order_response = self.client.place_order(
                     symbol=symbol,
                     side=side,
                     order_type='Market',
-                    qty=quantity,
-                    price=None, # Market order doesn't need price
+                    qty=final_quantity_str, # Pass the adjusted quantity string
+                    price=None,
                     stop_loss=stop_loss,
                     take_profit=take_profit
                 )
@@ -876,95 +972,83 @@ class ExecutionEngine:
                 # --- Process Response ---
                 if order_response and order_response.get('retCode') == 0:
                     order_id = order_response['result']['orderId']
-                    # Market orders usually fill immediately, avgPrice might be '0' initially via REST.
-                    # WS update will give the final price. Use decision price as temporary placeholder.
                     executed_price_str = order_response['result'].get('avgPrice', '0')
                     executed_price = float(executed_price_str) if executed_price_str and executed_price_str != '0' else current_price_at_decision
 
-                    # --- Update Internal State ---
+                    # Update Internal State
                     with self._state_lock:
                         self.open_orders[order_id] = {
-                            'symbol': symbol,
-                            'order_id': order_id,
-                            'side': side,
-                            'quantity': quantity,
-                            'timestamp': time.time(),
-                            'status': 'New', # Initial status, WS will update to Filled/etc.
-                            'type': 'Market',
-                            'avgPrice': executed_price # Store initial avgPrice
+                            'symbol': symbol, 'order_id': order_id, 'side': side,
+                            'quantity': final_quantity_float, # Store final float qty
+                            'timestamp': time.time(), 'status': 'New',
+                            'type': 'Market', 'avgPrice': executed_price
                         }
-                    # --------------------------
 
-                    self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, quantity, market_impact)
+                    self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
 
-                    # --- Prepare Trade Record for DB/History ---
-                    trade_record = {**decision} # Start with all decision data
+                    # Prepare Trade Record
+                    trade_record = {**decision}
                     trade_record.update({
-                        'timestamp': time.time(), # Consider order creation timestamp from response if available
-                        'side': side, # Use 'Buy'/'Sell'
-                        'entry_price': executed_price, # Use best guess at executed price
-                        'order_id': order_id,
-                        'success': True # Mark trade record as successfully placed
+                        'timestamp': time.time(), 'side': side,
+                        'quantity': final_quantity_float, # Store final executed quantity
+                        'position_size_usdt': final_size_usdt, # Store final approx size
+                        'entry_price': executed_price, 'order_id': order_id, 'success': True
                     })
-                    # Remove potentially large objects before storing if needed
-                    trade_record.pop('signals', None)
-                    trade_record.pop('market_context', None)
-                    trade_record.pop('trade_quality', None)
-                    # Keep ml_prediction dict as it's small
-
-                    self.trade_history.append(trade_record) # Append to local history
+                    trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
+                    self.trade_history.append(trade_record)
 
                     self.logger.info(f"✅ Enhanced trade for {symbol} placed successfully! Order ID: {order_id}")
 
-                    # --- Return Success Result ---
+                    # Return Success Result
                     return {
-                        'success': True,
-                        'order_id': order_id,
-                        'symbol': symbol,
-                        'side': side,
-                        'quantity': quantity,
-                        'executed_price': executed_price, # Return best guess execution price
-                        'position_size': position_size_usdt, # Return final executed size
-                        'stop_loss': stop_loss,
-                        'take_profit': take_profit,
+                        'success': True, 'order_id': order_id, 'symbol': symbol, 'side': side,
+                        'quantity': final_quantity_float, # Return final executed quantity
+                        'executed_price': executed_price,
+                        'position_size': final_size_usdt, # Return final executed size
+                        'stop_loss': stop_loss, 'take_profit': take_profit,
                         'risk_reward': decision.get('risk_reward_ratio', 0),
                         'confidence': decision.get('confidence', 0)
                     }
                 else:
-                    # --- Handle Order Placement Failure ---
+                    # Handle Order Placement Failure
                     error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
                     ret_code = order_response.get('retCode', -1) if order_response else -1
                     self.logger.error(f"❌ Enhanced trade order failed for {symbol}: {error_msg} (Code: {ret_code})")
 
-                    # Log failed attempt to history/DB
+                    # Log failed attempt
                     trade_record = {**decision}
                     trade_record.update({
-                        'timestamp': time.time(),
-                        'side': side,
-                        'entry_price': None,
-                        'order_id': None,
-                        'success': False,
+                        'timestamp': time.time(), 'side': side,
+                        'quantity': final_quantity_float, # Log attempted final quantity
+                        'position_size_usdt': final_size_usdt, # Log attempted final size
+                        'entry_price': None, 'order_id': None, 'success': False,
                         'error_message': f"Code {ret_code}: {error_msg}"
                     })
-                    trade_record.pop('signals', None)
-                    trade_record.pop('market_context', None)
-                    trade_record.pop('trade_quality', None)
+                    trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
                     self.trade_history.append(trade_record)
 
                     return {'success': False, 'message': f'Order failed ({ret_code}): {error_msg}'}
 
             except Exception as e:
-                # --- Handle Unexpected Errors ---
+                # Handle Unexpected Errors
                 symbol_for_log = decision.get('symbol', 'UNKNOWN') if isinstance(decision, dict) else 'UNKNOWN'
                 self.logger.error(f"❌ Exception during enhanced trade execution for {symbol_for_log}: {e}", exc_info=True)
-                # Log failure attempt if possible
                 if isinstance(decision, dict) and 'action' in decision and decision['action'] != 'HOLD':
                     try:
                         trade_record = {**decision}
-                        trade_record.update({ 'timestamp': time.time(), 'success': False, 'error_message': f'Execution Exception: {e}'})
+                        # Use initial or adjusted quantity/size if final calculation failed
+                        qty_to_log = float(adjusted_quantity_decimal) if 'adjusted_quantity_decimal' in locals() else quantity_initial
+                        size_to_log = float(final_size_usdt) if 'final_size_usdt' in locals() else position_size_usdt
+                        trade_record.update({
+                            'timestamp': time.time(),
+                            'quantity': qty_to_log,
+                            'position_size_usdt': size_to_log,
+                            'success': False,
+                            'error_message': f'Execution Exception: {e}'
+                        })
                         trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
                         self.trade_history.append(trade_record)
-                    except: pass # Avoid errors during error logging
+                    except: pass
                 return {'success': False, 'message': f'Execution engine error: {e}'}
     
     def execute_trade_with_retry(self, decision: Dict, max_retries: int = None):
@@ -1712,7 +1796,7 @@ class ExecutionEngine:
                 reconciliation['rest_check_performed'] = True
                 try:
                     self.logger.info("Reconciling positions using REST API...")
-                    actual_positions_response = self.client.get_position_info()
+                    actual_positions_response = self.client.get_position_info(category="linear")                    
                     if not actual_positions_response or actual_positions_response.get('retCode') != 0:
                         err = actual_positions_response.get('retMsg', 'Unknown') if actual_positions_response else 'No response'
                         reconciliation['errors'].append(f'Failed to get positions via REST: {err}')
@@ -1839,7 +1923,7 @@ class ExecutionEngine:
                 # 2. Identify Open Positions (Use REST for safety)
                 symbols_to_close = []
                 try:
-                    current_positions_response = self.client.get_position_info()
+                    current_positions_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                     if current_positions_response and current_positions_response.get('retCode') == 0:
                         symbols_to_close = [p['symbol'] for p in current_positions_response['result'].get('list', []) if float(p.get('size', 0)) > 0]
                     else:

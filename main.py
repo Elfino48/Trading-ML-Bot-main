@@ -48,6 +48,11 @@ class AdvancedTradingBot:
 
     def __init__(self, aggressiveness: str = "moderate"):
 
+        # --- Capture Start Time ---
+        self.start_time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        print(f"🚀 Initializing Advanced Trading Bot (Run ID: {self.start_time_str})...")
+        # --- End Capture Start Time ---
+
         print("🚀 Initializing Advanced Trading Bot...")
 
         self._setup_comprehensive_logging()
@@ -80,8 +85,9 @@ class AdvancedTradingBot:
 
             self.strategy_orchestrator = EnhancedStrategyOrchestrator(
                 self.client,
-                self.data_engine, # <-- Add this line
-                aggressiveness
+                self.data_engine,
+                aggressiveness,
+                run_start_time_str=self.start_time_str # Pass the unique start time
             )
 
             self.execution_engine = ExecutionEngine(self.client, self.risk_manager)
@@ -241,39 +247,27 @@ class AdvancedTradingBot:
                 'handlers': {
 
                     'file': {
-
                         'class': 'logging.handlers.RotatingFileHandler',
-
                         'filename': 'logs/trading_bot.log',
-
                         'maxBytes': 10485760,
-
                         'backupCount': 5,
-
-                        'formatter': 'detailed'
-
+                        'formatter': 'detailed',
+                        'encoding': 'utf-8'
                     },
 
                     'json_file': {
-
                         'class': 'logging.handlers.RotatingFileHandler',
-
                         'filename': 'logs/trading_bot_json.log',
-
                         'maxBytes': 10485760,
-
                         'backupCount': 5,
-
-                        'formatter': 'json'
-
+                        'formatter': 'json',
+                        'encoding': 'utf-8'
                     },
 
                     'console': {
-
                         'class': 'logging.StreamHandler',
-
-                        'formatter': 'detailed'
-
+                        'formatter': 'detailed',
+                        'stream': 'ext://sys.stdout'
                     }
 
                 },
@@ -296,7 +290,13 @@ class AdvancedTradingBot:
 
                         'propagate': False
 
-                    }
+                    },
+
+                    'enhanced_strategy_orchestrator': { # Or use __name__ value if you used that
+                        'level': 'DEBUG', # <<< Set level to DEBUG
+                        'handlers': ['file', 'json_file', 'console'], # Or whichever handlers you want
+                        'propagate': False # Optional: prevent duplication if root logger is also DEBUG
+                    },
 
                 }
 
@@ -955,7 +955,7 @@ class AdvancedTradingBot:
                         else:
                             account_info['positions'] = {}
                             print("⚠️ Failed to fetch position info")
-                            self.error_handler.handle_api_error(Exception("Failed to get positions"), "cycle_account_fetch")
+                            #self.error_handler.handle_api_error(Exception("Failed to get positions"), "cycle_account_fetch")
                     except Exception as e:
                         print(f"❌ Error fetching account data: {e}")
                         self.error_handler.handle_api_error(e, "cycle_account_fetch")
@@ -1655,7 +1655,7 @@ def main():
     print("💾 Database Logging: Active")
     print("🆘 Emergency Protocols: Active")
 
-    selected_aggressiveness = "moderate" # Default or get from user/config
+    selected_aggressiveness = "aggressive" # Default or get from user/config
     mode_choice = "1" # Default to live mode
 
     # --- Simplified Startup Selection (Example - keep commented out or remove for production) ---

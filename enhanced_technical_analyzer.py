@@ -29,72 +29,83 @@ class EnhancedTechnicalAnalyzer:
         self.macro_indicators = indicators
         
     def calculate_regime_indicators(self, df: pd.DataFrame) -> Dict:
-        if len(df) < 100:
-            return {}
-            
-        close = df['close'].astype(float)
-        high = df['high'].astype(float)
-        low = df['low'].astype(float)
-        volume = df['volume'].astype(float)
+            if len(df) < 100:
+                return {}
+
+            close = df['close'].astype(float)
+            high = df['high'].astype(float)
+            low = df['low'].astype(float)
+            volume = df['volume'].astype(float)
+
+            indicators = {}
+
+            try:
+                for period in [8, 21, 34, 55, 89]:
+                    indicators[f'ema_{period}'] = self._calculate_ema(close, period)
+
+                # --- FIX 1: Calculate and add SMA 50 ---
+                indicators['sma_50'] = self._calculate_sma(close, 50)
+                # --- END FIX 1 ---
+
+                hma_length = 20
+                indicators['hma'] = self._calculate_hma(close, hma_length)
+
+                indicators['super_trend'] = self._calculate_supertrend(high, low, close)
+
+                for period in [6, 14, 21]:
+                    indicators[f'rsi_{period}'] = self._calculate_rsi(close, period)
+
+                stoch_k, stoch_d = self._calculate_stochastic(high, low, close)
+                indicators['stoch_k'] = stoch_k
+                indicators['stoch_d'] = stoch_d
+
+                indicators['williams_r'] = self._calculate_williams_r(high, low, close)
+
+                indicators['atr'] = self._calculate_atr(high, low, close)
+                indicators['atr_percent'] = (indicators['atr'] / close.iloc[-1]) * 100 if close.iloc[-1] > 0 else 0
+
+                bb_upper, bb_middle, bb_lower = self._calculate_bollinger_bands(close)
+                indicators['bb_upper'] = bb_upper
+                indicators['bb_lower'] = bb_lower
+                indicators['bb_middle'] = bb_middle
+                indicators['bb_position'] = (close.iloc[-1] - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+
+                indicators['volume_sma_20'] = volume.rolling(20).mean().iloc[-1]
+                indicators['volume_ratio'] = volume.iloc[-1] / indicators['volume_sma_20'] if indicators['volume_sma_20'] > 0 else 1
+
+                obv = self._calculate_obv(close, volume)
+                indicators['obv_trend'] = self._calculate_slope(obv, 5)
+
+                regime_result = self._detect_market_regime_enhanced(close, high, low, volume)
+                indicators['market_regime'] = regime_result['regime']
+                indicators['regime_confidence'] = regime_result['confidence']
+                indicators['regime_transition_prob'] = regime_result['transition_prob']
+
+                sr_levels = self._find_support_resistance(close, high, low)
+                indicators['support'] = sr_levels['support']
+                indicators['resistance'] = sr_levels['resistance']
+
+                indicators['is_anomaly'] = self._detect_anomalies(close)
+
+                indicators['price_vs_high_20'] = close.iloc[-1] / high.rolling(20).max().iloc[-1] if high.rolling(20).max().iloc[-1] > 0 else 1
+                indicators['price_vs_low_20'] = close.iloc[-1] / low.rolling(20).min().iloc[-1] if low.rolling(20).min().iloc[-1] > 0 else 1
+
+                self.regime_history.append(indicators['market_regime'])
+                if len(self.regime_history) > 50:
+                    self.regime_history.pop(0)
+
+            except Exception as e:
+                print(f"Error calculating enhanced indicators: {e}")
+                return {}
+
+            return indicators
         
-        indicators = {}
-        
-        try:
-            for period in [8, 21, 34, 55, 89]:
-                indicators[f'ema_{period}'] = self._calculate_ema(close, period)
-            
-            hma_length = 20
-            indicators['hma'] = self._calculate_hma(close, hma_length)
-            
-            indicators['super_trend'] = self._calculate_supertrend(high, low, close)
-            
-            for period in [6, 14, 21]:
-                indicators[f'rsi_{period}'] = self._calculate_rsi(close, period)
-            
-            stoch_k, stoch_d = self._calculate_stochastic(high, low, close)
-            indicators['stoch_k'] = stoch_k
-            indicators['stoch_d'] = stoch_d
-            
-            indicators['williams_r'] = self._calculate_williams_r(high, low, close)
-            
-            indicators['atr'] = self._calculate_atr(high, low, close)
-            indicators['atr_percent'] = (indicators['atr'] / close.iloc[-1]) * 100
-            
-            bb_upper, bb_middle, bb_lower = self._calculate_bollinger_bands(close)
-            indicators['bb_upper'] = bb_upper
-            indicators['bb_lower'] = bb_lower
-            indicators['bb_middle'] = bb_middle
-            indicators['bb_position'] = (close.iloc[-1] - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
-            
-            indicators['volume_sma_20'] = volume.rolling(20).mean().iloc[-1]
-            indicators['volume_ratio'] = volume.iloc[-1] / indicators['volume_sma_20'] if indicators['volume_sma_20'] > 0 else 1
-            
-            obv = self._calculate_obv(close, volume)
-            indicators['obv_trend'] = self._calculate_slope(obv, 5)
-            
-            regime_result = self._detect_market_regime_enhanced(close, high, low, volume)
-            indicators['market_regime'] = regime_result['regime']
-            indicators['regime_confidence'] = regime_result['confidence']
-            indicators['regime_transition_prob'] = regime_result['transition_prob']
-            
-            sr_levels = self._find_support_resistance(close, high, low)
-            indicators['support'] = sr_levels['support']
-            indicators['resistance'] = sr_levels['resistance']
-            
-            indicators['is_anomaly'] = self._detect_anomalies(close)
-            
-            indicators['price_vs_high_20'] = close.iloc[-1] / high.rolling(20).max().iloc[-1]
-            indicators['price_vs_low_20'] = close.iloc[-1] / low.rolling(20).min().iloc[-1]
-            
-            self.regime_history.append(indicators['market_regime'])
-            if len(self.regime_history) > 50:
-                self.regime_history.pop(0)
-                
-        except Exception as e:
-            print(f"Error calculating enhanced indicators: {e}")
-            return {}
-            
-        return indicators
+    def _calculate_sma(self, series, period):
+            # Add basic calculation if TA libraries are not guaranteed
+            if len(series) < period:
+                return series.iloc[-1] if not series.empty else 0
+            sma = series.rolling(window=period).mean().iloc[-1]
+            return sma if not pd.isna(sma) else series.iloc[-1]
     
     def _calculate_ema(self, series, period):
         if TA_AVAILABLE:

@@ -35,7 +35,7 @@ class DataEngine:
             self.client.start_websockets()
             
             # Wait briefly for connections to establish (optional but can help)
-            time.sleep(2) 
+            time.sleep(5) 
             
             kline_interval_map = {
                 "1": 1, "3": 3, "5": 5, "15": 15, "30": 30, 

@@ -1,4 +1,6 @@
+from datetime import datetime
 import logging
+import os
 from enhanced_technical_analyzer import EnhancedTechnicalAnalyzer
 from ml_predictor import MLPredictor
 from advanced_risk_manager import AdvancedRiskManager
@@ -9,7 +11,7 @@ from typing import Dict, List, Tuple
 from scipy.optimize import minimize
 
 class EnhancedStrategyOrchestrator:
-    def __init__(self, bybit_client, data_engine: DataEngine, aggressiveness: str = "conservative", error_handler=None, database=None):
+    def __init__(self, bybit_client, data_engine: DataEngine, aggressiveness: str = "conservative", error_handler=None, database=None, run_start_time_str: str = None):
         self.ml_predictor = MLPredictor(error_handler, database)
         self.risk_manager = AdvancedRiskManager(bybit_client, aggressiveness)
         self.client = bybit_client 
@@ -23,6 +25,9 @@ class EnhancedStrategyOrchestrator:
         self.portfolio_signals = {}
         self.correlation_matrix = None
         self.asset_volatilities = {}
+        self.run_start_time_str = run_start_time_str or datetime.now().strftime("%Y%m%d_%H%M%S") # Fallback if not provided
+
+        self.logger = logging.getLogger(__name__)
 
         self._setup_cycle_logger() 
         self._set_aggressiveness_weights()
@@ -30,21 +35,52 @@ class EnhancedStrategyOrchestrator:
         print(f"🎯 Strategy Orchestrator set to: {self.aggressiveness.upper()} mode")
     
     def _setup_cycle_logger(self):
-            self.cycle_logger = logging.getLogger('CycleDetailsLogger')
+        """Sets up a logger for cycle details, creating a new file for each run."""
+        try:
+            # Use a unique name for the logger instance per run to avoid conflicts
+            logger_name = f'CycleDetailsLogger_{self.run_start_time_str}'
+            self.cycle_logger = logging.getLogger(logger_name)
             self.cycle_logger.setLevel(logging.INFO)
-            
-            self.cycle_logger.propagate = False 
-            
+
+            # Prevent messages from propagating to the root logger
+            self.cycle_logger.propagate = False
+
+            # Only add handlers if they haven't been added for this specific logger instance
             if not self.cycle_logger.hasHandlers():
-                file_handler = logging.FileHandler('cycle_details.log', mode='a')
+                # Ensure the 'logs' directory exists
+                log_dir = 'logs'
+                os.makedirs(log_dir, exist_ok=True)
+
+                # Create the unique filename
+                log_filename = os.path.join(log_dir, f'cycle_details_{self.run_start_time_str}.log')
+
+                # Use a standard FileHandler (not rotating for run-specific files)
+                file_handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
                 file_handler.setLevel(logging.INFO)
-                
+
+                # Simple formatter for just the message content
                 formatter = logging.Formatter('%(message)s')
                 file_handler.setFormatter(formatter)
-                
+
                 self.cycle_logger.addHandler(file_handler)
-            
-            print("📝 Cycle detail logger initialized (logs to cycle_details.log)")
+
+                print(f"📝 Cycle detail logger initialized (Logs to: {log_filename})")
+            else:
+                # Find the existing handler's filename if needed for confirmation
+                handler_filename = "Unknown"
+                if self.cycle_logger.handlers and isinstance(self.cycle_logger.handlers[0], logging.FileHandler):
+                    handler_filename = self.cycle_logger.handlers[0].baseFilename
+                print(f"ℹ️ Cycle detail logger already configured for this run (Logging to: {handler_filename})")
+
+
+        except Exception as e:
+            print(f"❌ Failed to setup cycle detail logger: {e}")
+            # Fallback: Create a logger that just prints to console if file setup fails
+            self.cycle_logger = logging.getLogger(f'CycleDetailsLogger_Fallback_{self.run_start_time_str}')
+            if not self.cycle_logger.hasHandlers():
+                    self.cycle_logger.addHandler(logging.StreamHandler())
+            self.cycle_logger.setLevel(logging.WARNING) # Log only warnings/errors if file fails
+            self.cycle_logger.warning("File logging for cycle details failed. Using console fallback.")
 
     def _log_cycle_details(self, decision: Dict):
             try:
@@ -662,131 +698,156 @@ class EnhancedStrategyOrchestrator:
                 self._log_cycle_details(fallback_decision)
                 
                 return fallback_decision
-            
+                
     def analyze_symbol_aggressive(self, symbol: str, historical_data: pd.DataFrame,
-                                            portfolio_value: float, aggressiveness: str = None) -> Dict:
+                                                portfolio_value: float, aggressiveness: str = None) -> Dict:
 
-                if aggressiveness is None:
-                    aggressiveness = self.aggressiveness
+            if aggressiveness is None:
+                aggressiveness = self.aggressiveness
 
-                # --- Initialize fallback decision structure early ---
-                analysis_price_fallback = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
-                fallback_decision = {
-                    'symbol': symbol,
-                    'current_price': analysis_price_fallback,
-                    'action': 'HOLD', 'confidence': 0, 'composite_score': 0,
-                    'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
-                    'position_size': 0, 'quantity': 0, 'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0,
-                    'signals': {}, 'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0},
-                    'market_regime': 'neutral', 'volatility_regime': 'normal',
-                    'aggressiveness': aggressiveness or self.aggressiveness,
-                    'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
-                    'market_context': {}, 'timestamp': pd.Timestamp.now(),
-                    'technical_indicators': {}, # Add empty dict for indicators in fallback
-                    'analysis_error': None
-                }
-                # --- End fallback init ---
+            # --- Initialize fallback decision structure early ---
+            analysis_price_fallback = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
+            fallback_decision = {
+                'symbol': symbol,
+                'current_price': analysis_price_fallback,
+                'action': 'HOLD', 'confidence': 0, 'composite_score': 0,
+                'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
+                'position_size': 0, 'quantity': 0, 'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0,
+                'signals': {}, 'ml_prediction': {'prediction': 0, 'confidence': 0, 'raw_prediction': 0},
+                'market_regime': 'neutral', 'volatility_regime': 'normal',
+                'aggressiveness': aggressiveness or self.aggressiveness,
+                'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
+                'market_context': {}, 'timestamp': pd.Timestamp.now(),
+                'technical_indicators': {}, # Add empty dict for indicators in fallback
+                'analysis_error': None
+            }
+            # --- End fallback init ---
 
-                try:
-                    if historical_data is None or len(historical_data) < 100:
-                        raise ValueError(f"Insufficient historical data for {symbol}")
+            indicators = {} # Define indicators early for the except block
+            try:
+                if historical_data is None or len(historical_data) < 100:
+                    raise ValueError(f"Insufficient historical data for {symbol}")
 
-                    analysis_price = historical_data['close'].iloc[-1]
-                    # --- Store the full indicators dictionary ---
-                    indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
-                    if not indicators: # Handle case where indicator calculation fails
-                        raise ValueError(f"Technical indicator calculation failed for {symbol}")
-                    # --- End store indicators ---
+                analysis_price = historical_data['close'].iloc[-1]
+                # --- Store the full indicators dictionary ---
+                indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
+                if not indicators: # Handle case where indicator calculation fails
+                    raise ValueError(f"Technical indicator calculation failed for {symbol}")
 
-                    signals = self.technical_analyzer.generate_enhanced_signals(indicators)
-                    ml_result = self.ml_predictor.predict(symbol, historical_data)
-                    atr = indicators.get('atr', analysis_price * 0.02)
-                    mtf_signals = self._multi_timeframe_analysis(historical_data)
+                # --- Add symbol and relevant prices to indicators dict ---
+                indicators['symbol'] = symbol
+                indicators['analysis_price'] = analysis_price # Price at kline close
+                indicators['close'] = analysis_price # Ensure 'close' key exists for strategy functions
+                # --- End add symbol/prices ---
 
-                    score_results = self._calculate_aggressive_composite_score(signals, ml_result, mtf_signals, aggressiveness)
-                    composite_score = score_results['composite_score']
-                    action, confidence = self._determine_aggressive_action(composite_score, signals, ml_result, aggressiveness)
+                signals = self.technical_analyzer.generate_enhanced_signals(indicators) # Uses indicators
+                ml_result = self.ml_predictor.predict(symbol, historical_data)
+                atr = indicators.get('atr', analysis_price * 0.02) # Use calculated ATR if available
+                mtf_signals = self._multi_timeframe_analysis(historical_data)
 
-                    latest_price = self.data_engine.get_current_price(symbol)
-                    if latest_price <= 0:
-                        # Use self.logger if available, otherwise print
-                        log_func = getattr(self, 'logger', None)
-                        if log_func and hasattr(log_func, 'warning'):
-                            log_func.warning(f"Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
-                        else:
-                            print(f"⚠️ Warning: Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
+                # --- Pass full 'indicators' dictionary here ---
+                score_results = self._calculate_aggressive_composite_score(
+                    indicators, # Pass the full dict
+                    signals,    # Signals generated from indicators
+                    ml_result,
+                    mtf_signals,
+                    aggressiveness
+                )
+                # --- End pass full 'indicators' ---
 
-                        if self.error_handler:
-                            self.error_handler.handle_data_error(Exception("Failed to get latest price"), "analyze_symbol_risk", symbol)
-                        latest_price = analysis_price
+                composite_score = score_results['composite_score']
 
-                    position_info = self.risk_manager.calculate_aggressive_position_size(
-                        symbol, confidence, latest_price, atr, portfolio_value, aggressiveness
-                    )
+                # Determine action based on scores and ML
+                action, confidence = self._determine_aggressive_action(
+                    composite_score,
+                    signals, # Signals might be enough here, or pass indicators if needed
+                    ml_result,
+                    aggressiveness
+                )
 
-                    volatility_regime = 'high' if indicators.get('atr_percent', 0) > 3 else 'low' if indicators.get('atr_percent', 0) < 1 else 'normal'
-
-                    sl_tp_levels = {}
-                    if action != 'HOLD':
-                        sl_tp_levels = self.risk_manager.calculate_aggressive_stop_loss(
-                            symbol, action, latest_price, atr, aggressiveness
-                        )
-                    else:
-                        sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
-
-                    trade_quality = self._assess_trade_quality(indicators, signals, ml_result, action)
-                    market_context = self._analyze_market_context(indicators, historical_data)
-
-                    decision = {
-                        'symbol': symbol,
-                        'current_price': latest_price,
-                        'action': action,
-                        'confidence': confidence,
-                        'composite_score': composite_score,
-                        'trend_score': score_results['trend_score'],
-                        'mr_score': score_results['mr_score'],
-                        'breakout_score': score_results['breakout_score'],
-                        'ml_score': score_results['ml_score'],
-                        'mtf_score': score_results['mtf_score'],
-                        'position_size': position_info['size_usdt'],
-                        'quantity': position_info['quantity'],
-                        'stop_loss': sl_tp_levels['stop_loss'],
-                        'take_profit': sl_tp_levels['take_profit'],
-                        'risk_reward_ratio': sl_tp_levels['risk_reward_ratio'],
-                        'signals': signals, # Contains processed signal scores
-                        'ml_prediction': ml_result,
-                        'market_regime': indicators.get('market_regime', 'neutral'),
-                        'volatility_regime': volatility_regime,
-                        'aggressiveness': aggressiveness,
-                        'trade_quality': trade_quality,
-                        'market_context': market_context,
-                        'timestamp': pd.Timestamp.now(),
-                        'analysis_price': analysis_price,
-                        'technical_indicators': indicators # <-- ADDED: Store raw indicators
-                    }
-
-                    self._log_cycle_details(decision) # Log the complete decision
-
-                    if self.database and action != 'HOLD':
-                        db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality', 'technical_indicators']} # Exclude raw indicators from DB event too
-                        self.database.store_system_event("TRADING_DECISION", db_event_data, "INFO", "Strategy Analysis")
-
-
-                    return decision
-
-                except Exception as e:
-                    error_msg = f"Error in aggressive analysis for {symbol}: {e}"
-                    print(f"❌ {error_msg}")
-
+                # Get the very latest price for execution sizing and SL/TP placement
+                latest_price = self.data_engine.get_current_price(symbol)
+                if latest_price <= 0:
+                    self.logger.warning(f"Could not fetch latest price for {symbol}, falling back to analysis price: {analysis_price}")
                     if self.error_handler:
-                        self.error_handler.handle_trading_error(e, symbol, "aggressive_analysis")
+                        self.error_handler.handle_data_error(Exception("Failed to get latest price"), "analyze_symbol_risk", symbol)
+                    latest_price = analysis_price # Use analysis price as fallback
 
-                    # Update fallback with error and log it
-                    fallback_decision['analysis_error'] = str(e)
-                    fallback_decision['timestamp'] = pd.Timestamp.now() # Update timestamp for error
-                    self._log_cycle_details(fallback_decision)
+                # Calculate position size using the latest price
+                position_info = self.risk_manager.calculate_aggressive_position_size(
+                    symbol, confidence, latest_price, atr, portfolio_value, aggressiveness
+                )
 
-                    return fallback_decision
+                # Determine volatility regime based on indicators
+                volatility_regime = 'high' if indicators.get('atr_percent', 0) > 3 else 'low' if indicators.get('atr_percent', 0) < 1 else 'normal'
+
+                # Calculate SL/TP using the latest price
+                sl_tp_levels = {}
+                if action != 'HOLD':
+                    sl_tp_levels = self.risk_manager.calculate_aggressive_stop_loss(
+                        symbol, action, latest_price, atr, aggressiveness
+                    )
+                else:
+                    sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
+
+                # Assess trade quality and market context based on indicators
+                trade_quality = self._assess_trade_quality(indicators, signals, ml_result, action)
+                market_context = self._analyze_market_context(indicators, historical_data)
+
+                # --- Assemble the final decision dictionary ---
+                decision = {
+                    'symbol': symbol,
+                    'current_price': latest_price, # Use latest price for execution context
+                    'action': action,
+                    'confidence': confidence,
+                    'composite_score': composite_score,
+                    'trend_score': score_results['trend_score'],
+                    'mr_score': score_results['mr_score'],
+                    'breakout_score': score_results['breakout_score'],
+                    'ml_score': score_results['ml_score'],
+                    'mtf_score': score_results['mtf_score'],
+                    'position_size': position_info['size_usdt'],
+                    'quantity': position_info['quantity'],
+                    'stop_loss': sl_tp_levels['stop_loss'],
+                    'take_profit': sl_tp_levels['take_profit'],
+                    'risk_reward_ratio': sl_tp_levels['risk_reward_ratio'],
+                    'signals': signals, # Contains processed signal scores
+                    'ml_prediction': ml_result,
+                    'market_regime': indicators.get('market_regime', 'neutral'),
+                    'volatility_regime': volatility_regime,
+                    'aggressiveness': aggressiveness,
+                    'trade_quality': trade_quality,
+                    'market_context': market_context,
+                    'timestamp': pd.Timestamp.now(),
+                    'analysis_price': analysis_price, # Keep the price used for analysis distinct
+                    'technical_indicators': indicators # Store the full raw indicators dict used
+                }
+
+                self._log_cycle_details(decision) # Log the complete decision
+
+                # Store significant decisions (e.g., non-HOLD) to database
+                if self.database and action != 'HOLD':
+                    # Exclude potentially large/complex dicts before storing event summary
+                    db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality', 'technical_indicators']}
+                    self.database.store_system_event("TRADING_DECISION", db_event_data, "INFO", "Strategy Analysis")
+
+                return decision
+
+            except Exception as e:
+                error_msg = f"Error in aggressive analysis for {symbol}: {e}"
+                self.logger.error(error_msg, exc_info=True) # Log exception traceback
+
+                if self.error_handler:
+                    self.error_handler.handle_trading_error(e, symbol, "aggressive_analysis")
+
+                # Update fallback with error and log it
+                fallback_decision['analysis_error'] = str(e)
+                # Ensure indicators dict exists, even if empty, before logging fallback
+                fallback_decision['technical_indicators'] = indicators if 'indicators' in locals() and indicators else {}
+                fallback_decision['timestamp'] = pd.Timestamp.now() # Update timestamp for error
+                self._log_cycle_details(fallback_decision)
+
+                return fallback_decision
     
     def calculate_dynamic_weights(self, market_regime: str, volatility: float, recent_performance: dict, aggressiveness: str) -> Dict[str, float]:
         
@@ -978,128 +1039,168 @@ class EnhancedStrategyOrchestrator:
                 self.error_handler.handle_trading_error(e, "ALL", "multi_timeframe_analysis")
             return {'timeframe_alignment': 0, 'alignment_strength': 0}
     
-    def _calculate_aggressive_composite_score(self, signals: Dict, ml_result: Dict, mtf_signals: Dict, aggressiveness: str) -> Dict[str, float]:
-            """Calculates composite score and returns individual strategy scores."""
-            try:
-                # Determine weights based on aggressiveness (copied logic from original)
-                if aggressiveness == "conservative":
-                    weights = {
-                        'trend_following': 0.40, 'mean_reversion': 0.30, 
-                        'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10 # Added MTF weight
-                    }
-                elif aggressiveness == "moderate":
-                    weights = {
-                        'trend_following': 0.25, 'mean_reversion': 0.35, 
-                        'breakout': 0.20, 'ml_prediction': 0.20, 'mtf': 0.10
-                    }
-                elif aggressiveness == "aggressive":
-                    weights = {
-                        'trend_following': 0.20, 'mean_reversion': 0.40, 
-                        'breakout': 0.25, 'ml_prediction': 0.15, 'mtf': 0.10
-                    }
-                elif aggressiveness == "high":
-                    weights = {
-                        'trend_following': 0.15, 'mean_reversion': 0.45, 
-                        'breakout': 0.30, 'ml_prediction': 0.10, 'mtf': 0.10
-                    }
-                else: # Default to conservative
-                    weights = {
-                        'trend_following': 0.40, 'mean_reversion': 0.30, 
-                        'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10
-                    }
-
-                # Calculate individual strategy scores
-                trend_score = self._trend_following_strategy(signals)
-                mean_reversion_score = self._mean_reversion_strategy(signals)
-                breakout_score = self._breakout_strategy(signals, mtf_signals)
-                
-                # Use raw_prediction for ML score to keep directionality (-2 to +2 range -> -100 to +100)
-                ml_raw_pred = ml_result.get('raw_prediction', 0) 
-                ml_score = ml_raw_pred * 50 # Scale to roughly -100 to +100
-                
-                # Multi-timeframe score
-                mtf_alignment = mtf_signals.get('timeframe_alignment', 0)
-                mtf_strength = mtf_signals.get('alignment_strength', 0.5) # Default to medium strength if aligned
-                mtf_score = mtf_alignment * 50 * mtf_strength # Scale alignment (-1 to 1) * 50 * strength (0 to 1)
-
-                # Normalize weights just in case they don't sum to 1
-                total_weight = sum(weights.values())
-                if total_weight > 0:
-                    normalized_weights = {k: v / total_weight for k, v in weights.items()}
-                else:
-                    normalized_weights = weights # Avoid division by zero
-
-                # Calculate composite score using normalized weights
-                composite = (
-                    trend_score * normalized_weights.get('trend_following', 0) +
-                    mean_reversion_score * normalized_weights.get('mean_reversion', 0) +
-                    breakout_score * normalized_weights.get('breakout', 0) +
-                    ml_score * normalized_weights.get('ml_prediction', 0) +
-                    mtf_score * normalized_weights.get('mtf', 0) # Include MTF score
-                )
-
-                # Return both composite and individual scores
-                return {
-                    'composite_score': composite,
-                    'trend_score': trend_score,
-                    'mr_score': mean_reversion_score, # Use shorter name for DB
-                    'breakout_score': breakout_score,
-                    'ml_score': ml_score,
-                    'mtf_score': mtf_score
+    def _calculate_aggressive_composite_score(self,
+                                                indicators: Dict, # <<< Accepts indicators dict
+                                                signals: Dict,
+                                                ml_result: Dict,
+                                                mtf_signals: Dict,
+                                                aggressiveness: str) -> Dict[str, float]:
+        """Calculates composite score using individual strategies and returns breakdowns."""
+        try:
+            # --- Determine weights based on aggressiveness ---
+            # (Copied logic from original, including MTF weight)
+            if aggressiveness == "conservative":
+                weights = {
+                    'trend_following': 0.40, 'mean_reversion': 0.30,
+                    'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10
                 }
+            elif aggressiveness == "moderate":
+                weights = {
+                    'trend_following': 0.25, 'mean_reversion': 0.35,
+                    'breakout': 0.20, 'ml_prediction': 0.20, 'mtf': 0.10
+                }
+            elif aggressiveness == "aggressive":
+                weights = {
+                    'trend_following': 0.20, 'mean_reversion': 0.40,
+                    'breakout': 0.25, 'ml_prediction': 0.15, 'mtf': 0.10
+                }
+            elif aggressiveness == "high":
+                weights = {
+                    'trend_following': 0.15, 'mean_reversion': 0.45,
+                    'breakout': 0.30, 'ml_prediction': 0.10, 'mtf': 0.10
+                }
+            else: # Default to conservative
+                weights = {
+                    'trend_following': 0.40, 'mean_reversion': 0.30,
+                    'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10
+                }
+
+            # --- Calculate individual strategy scores, passing 'indicators' ---
+            trend_score = self._trend_following_strategy(indicators)
+            mean_reversion_score = self._mean_reversion_strategy(indicators)
+            breakout_score = self._breakout_strategy(indicators, mtf_signals)
+            # --- End passing 'indicators' ---
+
+            # ML Score calculation (unchanged)
+            ml_raw_pred = ml_result.get('raw_prediction', 0)
+            ml_score = ml_raw_pred * 50 # Scale to roughly -100 to +100
+
+            # Multi-timeframe score calculation (unchanged)
+            mtf_alignment = mtf_signals.get('timeframe_alignment', 0)
+            mtf_strength = mtf_signals.get('alignment_strength', 0.5)
+            mtf_score = mtf_alignment * 50 * mtf_strength
+
+            # Normalize weights (unchanged)
+            total_weight = sum(weights.values())
+            if total_weight > 0:
+                normalized_weights = {k: v / total_weight for k, v in weights.items()}
+            else:
+                normalized_weights = weights # Avoid division by zero
+
+            # Calculate composite score using normalized weights (unchanged)
+            composite = (
+                trend_score * normalized_weights.get('trend_following', 0) +
+                mean_reversion_score * normalized_weights.get('mean_reversion', 0) +
+                breakout_score * normalized_weights.get('breakout', 0) +
+                ml_score * normalized_weights.get('ml_prediction', 0) +
+                mtf_score * normalized_weights.get('mtf', 0) # Include MTF score
+            )
+
+            # Return both composite and individual scores
+            return {
+                'composite_score': composite,
+                'trend_score': trend_score,
+                'mr_score': mean_reversion_score, # Use shorter name for DB
+                'breakout_score': breakout_score,
+                'ml_score': ml_score,
+                'mtf_score': mtf_score
+            }
+
+        except Exception as e:
+            # Log using self.logger if available
+            if hasattr(self, 'logger'):
+                # Try to get symbol from indicators for better context
+                symbol = indicators.get('symbol', 'ALL') if isinstance(indicators, dict) else 'ALL'
+                self.logger.error(f"[{symbol}] Error calculating composite score: {e}", exc_info=True)
+
+            # Pass to error handler if available
+            if self.error_handler:
+                symbol = indicators.get('symbol', 'ALL') if isinstance(indicators, dict) else 'ALL'
+                self.error_handler.handle_trading_error(e, symbol, "composite_score_calculation")
+
+            # Return neutral scores on error
+            return {
+                'composite_score': 0, 'trend_score': 0, 'mr_score': 0,
+                'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0
+            }
+
+    def _trend_following_strategy(self, indicators: Dict) -> float:
+            try:
+                score = 0
+
+                # --- FIX 3 Check: Ensure indicators are valid numbers ---
+                ema_8 = float(indicators.get('ema_8', 0))
+                ema_21 = float(indicators.get('ema_21', 0))
+                ema_55 = float(indicators.get('ema_55', 0))
+                ema_89 = float(indicators.get('ema_89', 0))
+                macd = float(indicators.get('macd', 0))
+                macd_signal = float(indicators.get('macd_signal', 0))
+                sma_50 = float(indicators.get('sma_50', 0)) # Uses the newly calculated SMA 50
+                hma = float(indicators.get('hma', 0))
+                current_price = float(indicators.get('bb_middle', indicators.get('ema_8', 0))) # Use bb_middle or ema_8 as fallback
+
+                # --- FIX 3 Logic Check: EMA Alignment ---
+                # Award points based on the *degree* of alignment, not just all-or-nothing
+                ema_bullish_points = 0
+                if ema_8 > ema_21: ema_bullish_points += 10
+                if ema_21 > ema_55: ema_bullish_points += 10
+                if ema_55 > ema_89: ema_bullish_points += 10
+
+                ema_bearish_points = 0
+                if ema_8 < ema_21: ema_bearish_points -= 10
+                if ema_21 < ema_55: ema_bearish_points -= 10
+                if ema_55 < ema_89: ema_bearish_points -= 10
+
+                # Assign score based on strongest alignment (max 30 points)
+                if ema_bullish_points >= 20: # Strong bullish alignment
+                    score += 30
+                elif ema_bearish_points <= -20: # Strong bearish alignment
+                    score -= 30
+                #else: score remains 0 for mixed EMAs
+
+                # --- FIX 3 Logic Check: MACD ---
+                # Use a threshold to avoid noise near zero crossover
+                macd_diff = macd - macd_signal
+                if macd_diff > abs(macd_signal * 0.01): # Bullish cross with threshold
+                    score += 20
+                elif macd_diff < -abs(macd_signal * 0.01): # Bearish cross with threshold
+                    score -= 20
+
+                # --- FIX 1 Usage: SMA 50 ---
+                # Ensure sma_50 is valid before comparison
+                if sma_50 > 0:
+                    if current_price > sma_50:
+                        score += 20
+                    else:
+                        score -= 20
+                #else: No points if SMA 50 calculation failed
+
+                # --- FIX 3 Logic Check: HMA ---
+                # Compare HMA trend direction relative to price (HMA rising/falling could be added)
+                if hma < current_price: # Price above HMA suggests uptrend
+                    score += 10
+                elif hma > current_price: # Price below HMA suggests downtrend
+                    score -= 10
+
+                # --- FIX 3 Clamp Score: Ensure score is within -100 to +100 ---
+                score = max(-80, min(80, score)) # Limit range based on components (30+20+20+10 = 80)
+
+                return score
 
             except Exception as e:
                 if self.error_handler:
-                    self.error_handler.handle_trading_error(e, "ALL", "composite_score_calculation")
-                # Return neutral scores on error
-                return {
-                    'composite_score': 0, 'trend_score': 0, 'mr_score': 0, 
-                    'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0
-                }
-
-    def _trend_following_strategy(self, indicators: Dict) -> float:
-        try:
-            score = 0
-            
-            ema_bullish = (
-                indicators.get('ema_8', 0) > indicators.get('ema_21', 0) and
-                indicators.get('ema_21', 0) > indicators.get('ema_55', 0) and
-                indicators.get('ema_55', 0) > indicators.get('ema_89', 0)
-            )
-            
-            ema_bearish = (
-                indicators.get('ema_8', 0) < indicators.get('ema_21', 0) and
-                indicators.get('ema_21', 0) < indicators.get('ema_55', 0) and
-                indicators.get('ema_55', 0) < indicators.get('ema_89', 0)
-            )
-            
-            if ema_bullish:
-                score += 40
-            elif ema_bearish:
-                score -= 40
-                
-            if indicators.get('macd', 0) > indicators.get('macd_signal', 0):
-                score += 20
-            else:
-                score -= 20
-                
-            current_price = indicators.get('bb_middle', 0)
-            if current_price > indicators.get('sma_50', 1):
-                score += 20
-            else:
-                score -= 20
-                
-            if indicators.get('hma', 0) < current_price:
-                score += 10
-            else:
-                score -= 10
-                
-            return score
-            
-        except Exception as e:
-            if self.error_handler:
-                self.error_handler.handle_trading_error(e, "ALL", "trend_following_strategy")
-            return 0
+                    self.error_handler.handle_trading_error(e, "ALL", "trend_following_strategy")
+                return 0
     
     def _mean_reversion_strategy(self, indicators: Dict) -> float:
         try:
@@ -1138,41 +1239,113 @@ class EnhancedStrategyOrchestrator:
             if self.error_handler:
                 self.error_handler.handle_trading_error(e, "ALL", "mean_reversion_strategy")
             return 0
-    
+        
     def _breakout_strategy(self, indicators: Dict, mtf_signals: Dict) -> float:
-        try:
-            score = 0
-            
-            resistance = indicators.get('resistance', 0)
-            support = indicators.get('support', 0)
-            current_price = indicators.get('bb_middle', 0)
-            
-            resistance_distance = (resistance - current_price) / current_price if current_price > 0 else 0
-            if 0 < resistance_distance < 0.02 and indicators.get('rsi_14', 50) > 60:
-                score += 25
-                
-            support_distance = (current_price - support) / current_price if current_price > 0 else 0
-            if 0 < support_distance < 0.02 and indicators.get('rsi_14', 50) < 40:
-                score -= 25
-                
-            volume_ratio = indicators.get('volume_ratio', 1)
-            if volume_ratio > 1.5:
-                score += 20
-                
-            alignment_strength = mtf_signals.get('alignment_strength', 0)
-            if alignment_strength > 0.6:
-                score += 15
-                
-            atr_percent = indicators.get('atr_percent', 0)
-            if atr_percent < 1.0:
-                score += 10
-                
-            return score
-            
-        except Exception as e:
-            if self.error_handler:
-                self.error_handler.handle_trading_error(e, "ALL", "breakout_strategy")
-            return 0
+            try:
+                score = 0
+                # --- Add symbol retrieval here ---
+                # Assuming 'symbol' might be available directly in indicators now
+                # If not, it needs to be added during indicator calculation or passed separately
+                symbol = indicators.get('symbol', 'UNKNOWN')
+                # --- End symbol retrieval ---
+
+                # Ensure indicators are valid numbers
+                resistance = float(indicators.get('resistance', 0))
+                support = float(indicators.get('support', 0))
+                # Use analysis_price if available, otherwise fallback
+                # Let's use the actual close price for consistency with how indicators were likely calculated
+                current_price = float(indicators.get('close', indicators.get('bb_middle', indicators.get('ema_8', 0)))) # Use actual close if available
+                rsi_14 = float(indicators.get('rsi_14', 50))
+                volume_ratio = float(indicators.get('volume_ratio', 1))
+                atr_percent = float(indicators.get('atr_percent', 2)) # Default to 2% if missing
+                alignment_strength = float(mtf_signals.get('alignment_strength', 0))
+
+                self.logger.debug(f"[{symbol}] Breakout Start: Initial score = {score}, Price={current_price:.4f}, Res={resistance:.4f}, Sup={support:.4f}, RSI={rsi_14:.2f}, ATR%={atr_percent:.2f}, VolRatio={volume_ratio:.2f}, MTFStr={alignment_strength:.2f}") # Log Start with key inputs
+
+                # --- S/R Check with Detailed Logging ---
+                resistance_distance = (resistance - current_price) / current_price if current_price > 0 else 0
+                support_distance = (current_price - support) / current_price if current_price > 0 else 0
+                sr_score_change = 0
+
+                # Resistance Check Branch
+                res_cond1 = resistance > 0
+                res_cond2 = 0 < resistance_distance < 0.015
+                res_cond3 = rsi_14 > 55
+                self.logger.debug(f"[{symbol}] Res Check Values: res_gt_0={res_cond1}, dist_ok={res_cond2} (dist={resistance_distance:.6f}), rsi_ok={res_cond3} (rsi={rsi_14:.2f})")
+                if res_cond1 and res_cond2 and res_cond3:
+                    sr_score_change = 25
+                    self.logger.debug(f"[{symbol}] Breakout S/R Check: PASSED +{sr_score_change} (Near Resistance)")
+                else:
+                    # Support Check Branch (only if resistance check failed)
+                    sup_cond1 = support > 0
+                    sup_cond2 = 0 < support_distance < 0.015
+                    sup_cond3 = rsi_14 < 45
+                    self.logger.debug(f"[{symbol}] Sup Check Values: sup_gt_0={sup_cond1}, dist_ok={sup_cond2} (dist={support_distance:.6f}), rsi_ok={sup_cond3} (rsi={rsi_14:.2f})")
+                    if sup_cond1 and sup_cond2 and sup_cond3:
+                        sr_score_change = -25
+                        self.logger.debug(f"[{symbol}] Breakout S/R Check: PASSED {sr_score_change} (Near Support)")
+                    else:
+                        self.logger.debug(f"[{symbol}] Breakout S/R Check: FAILED +0 (Conditions not met)")
+
+                score += sr_score_change
+                self.logger.debug(f"[{symbol}] Breakout Score after S/R = {score}") # Log after S/R
+
+                # --- Volume Check ---
+                vol_score_change = 0
+                vol_cond = volume_ratio > 1.5
+                self.logger.debug(f"[{symbol}] Vol Check Values: vol_ratio={volume_ratio:.2f}, condition_met={vol_cond}")
+                if vol_cond:
+                    vol_score_change = 20
+                    self.logger.debug(f"[{symbol}] Breakout Volume Check: PASSED +{vol_score_change}")
+                else:
+                    self.logger.debug(f"[{symbol}] Breakout Volume Check: FAILED +0")
+                score += vol_score_change
+                self.logger.debug(f"[{symbol}] Breakout Score after Volume = {score}") # Log after Volume
+
+                # --- MTF Alignment Check ---
+                mtf_score_change = 0
+                mtf_cond = alignment_strength >= 0.7
+                self.logger.debug(f"[{symbol}] MTF Check Values: align_strength={alignment_strength:.2f}, condition_met={mtf_cond}")
+                if mtf_cond: # Require stronger alignment
+                    mtf_alignment_direction = int(mtf_signals.get('timeframe_alignment', 0))
+                    mtf_score_change = (15 * mtf_alignment_direction)
+                    self.logger.debug(f"[{symbol}] Breakout MTF Check: PASSED +{mtf_score_change} (Direction={mtf_alignment_direction})")
+                else:
+                    self.logger.debug(f"[{symbol}] Breakout MTF Check: FAILED +0")
+                score += mtf_score_change
+                self.logger.debug(f"[{symbol}] Breakout Score after MTF = {score}") # Log after MTF
+
+                # --- ATR/Volatility Check with Detailed Logging ---
+                atr_score_change = 0
+                atr_cond = atr_percent < 1.0
+                self.logger.debug(f"[{symbol}] ATR Check Values: atr_percent={atr_percent:.4f}, condition_met={atr_cond}")
+                if atr_cond:
+                    atr_score_change = 10
+                    self.logger.debug(f"[{symbol}] Breakout ATR Check: PASSED +{atr_score_change}")
+                else:
+                    self.logger.debug(f"[{symbol}] Breakout ATR Check: FAILED +0")
+                score += atr_score_change
+                self.logger.debug(f"[{symbol}] Breakout Score after ATR = {score}") # Log after ATR
+
+                # --- Clamp Score ---
+                final_score = max(-70, min(70, score))
+                if final_score != score:
+                    self.logger.debug(f"[{symbol}] Breakout Score Clamped: {score} -> {final_score}") # Log clamping
+                else:
+                    self.logger.debug(f"[{symbol}] Breakout Final Score: {final_score} (No clamping needed)") # Log final score
+
+                return final_score
+
+            except Exception as e:
+                # Log the error using the class logger *before* passing to error handler
+                # Try getting symbol even in exception for context
+                symbol_in_ex = indicators.get('symbol', 'UNKNOWN') if isinstance(indicators, dict) else 'UNKNOWN'
+                self.logger.error(f"[{symbol_in_ex}] Error in breakout strategy calculation: {e}", exc_info=True)
+                if self.error_handler:
+                    # Pass symbol if available
+                    self.error_handler.handle_trading_error(e, symbol_in_ex, "breakout_strategy")
+                # Fallback to neutral score
+                return 0
 
     def _determine_aggressive_action(self, composite_score: float, signals: Dict, ml_result: Dict, aggressiveness: str) -> tuple:
             try:
