@@ -1,3 +1,4 @@
+import logging
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -24,7 +25,144 @@ class EnhancedTechnicalAnalyzer:
         self.regime_threshold = 0.5
         self.regime_history = []
         self.macro_indicators = {}
+        self.logger = logging.getLogger(__name__)
+
+    def calculate_momentum_alignment(self, df: pd.DataFrame) -> Dict:
+        """Calculate momentum alignment across multiple timeframes and indicators"""
+        if len(df) < 100:
+            return {}
         
+        close = df['close'].astype(float)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        
+        momentum_indicators = {}
+        
+        try:
+            # 1. Price Momentum (20, 50, 100 periods)
+            for period in [20, 50, 100]:
+                if len(close) > period:
+                    momentum = (close.iloc[-1] / close.iloc[-period] - 1) * 100
+                    momentum_indicators[f'price_momentum_{period}'] = momentum
+            
+            # 2. Moving Average Alignment
+            ema_8 = self._calculate_ema(close, 8)
+            ema_21 = self._calculate_ema(close, 21)
+            ema_55 = self._calculate_ema(close, 55)
+            
+            ma_alignment = 0
+            if ema_8 > ema_21 > ema_55:
+                ma_alignment = 1  # Strong bullish
+            elif ema_8 < ema_21 < ema_55:
+                ma_alignment = -1  # Strong bearish
+            
+            momentum_indicators['ma_alignment'] = ma_alignment
+            momentum_indicators['ma_alignment_strength'] = self._calculate_ma_alignment_strength(ema_8, ema_21, ema_55)
+            
+            # 3. RSI Momentum
+            rsi_14 = self._calculate_rsi(close, 14)
+            rsi_21 = self._calculate_rsi(close, 21)
+            
+            momentum_indicators['rsi_trend'] = 1 if rsi_14 > rsi_21 else -1
+            momentum_indicators['rsi_momentum'] = rsi_14 - rsi_21
+            
+            # 4. MACD Momentum
+            macd, macd_signal = self._calculate_macd_momentum(close)
+            momentum_indicators['macd_momentum'] = macd - macd_signal
+            momentum_indicators['macd_trend'] = 1 if macd > macd_signal else -1
+            
+            # 5. Volume-Weighted Momentum
+            volume = df['volume'].astype(float)
+            vwap = self._calculate_vwap(high, low, close, volume)
+            price_vs_vwap = (close.iloc[-1] / vwap - 1) * 100
+            momentum_indicators['vwap_momentum'] = price_vs_vwap
+            
+            # 6. Composite Momentum Score
+            composite_momentum = self._calculate_composite_momentum(momentum_indicators)
+            momentum_indicators['composite_momentum'] = composite_momentum
+            momentum_indicators['momentum_regime'] = self._classify_momentum_regime(composite_momentum)
+            
+            return momentum_indicators
+            
+        except Exception as e:
+            print(f"Error calculating momentum alignment: {e}")
+            return {}
+
+    def _calculate_ma_alignment_strength(self, ema_8: float, ema_21: float, ema_55: float) -> float:
+        """Calculate the strength of moving average alignment"""
+        if ema_8 > ema_21 > ema_55:
+            # Bullish alignment strength
+            strength_8_21 = (ema_8 - ema_21) / ema_21
+            strength_21_55 = (ema_21 - ema_55) / ema_55
+            return (strength_8_21 + strength_21_55) / 2 * 100
+        elif ema_8 < ema_21 < ema_55:
+            # Bearish alignment strength
+            strength_8_21 = (ema_21 - ema_8) / ema_8
+            strength_21_55 = (ema_55 - ema_21) / ema_21
+            return (strength_8_21 + strength_21_55) / 2 * 100
+        else:
+            return 0
+
+    def _calculate_macd_momentum(self, close: pd.Series) -> Tuple[float, float]:
+        """Calculate MACD momentum"""
+        try:
+            exp1 = close.ewm(span=12).mean()
+            exp2 = close.ewm(span=26).mean()
+            macd = exp1 - exp2
+            macd_signal = macd.ewm(span=9).mean()
+            return macd.iloc[-1], macd_signal.iloc[-1]
+        except:
+            return 0, 0
+
+    def _calculate_vwap(self, high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> float:
+        """Calculate Volume Weighted Average Price"""
+        try:
+            typical_price = (high + low + close) / 3
+            vwap = (typical_price * volume).cumsum() / volume.cumsum()
+            return vwap.iloc[-1]
+        except:
+            return close.iloc[-1]
+
+    def _calculate_composite_momentum(self, momentum_indicators: Dict) -> float:
+        """Calculate composite momentum score from all indicators"""
+        score = 0
+        weights = {
+            'price_momentum_20': 0.15,
+            'price_momentum_50': 0.20,
+            'price_momentum_100': 0.15,
+            'ma_alignment': 0.20,
+            'ma_alignment_strength': 0.10,
+            'rsi_momentum': 0.10,
+            'macd_momentum': 0.10
+        }
+        
+        for indicator, weight in weights.items():
+            value = momentum_indicators.get(indicator, 0)
+            # Normalize different indicators to similar scale
+            if 'momentum' in indicator:
+                normalized_value = max(-100, min(100, value)) / 100
+            elif 'alignment' in indicator:
+                normalized_value = value
+            else:
+                normalized_value = value / 100  # Assume percentage values
+            
+            score += normalized_value * weight
+        
+        return score * 100  # Return as percentage
+
+    def _classify_momentum_regime(self, composite_momentum: float) -> str:
+        """Classify momentum regime based on composite score"""
+        if composite_momentum > 30:
+            return "strong_bullish"
+        elif composite_momentum > 10:
+            return "bullish"
+        elif composite_momentum < -30:
+            return "strong_bearish"
+        elif composite_momentum < -10:
+            return "bearish"
+        else:
+            return "neutral"
+
     def set_macro_indicators(self, indicators: Dict):
         self.macro_indicators = indicators
         
@@ -89,6 +227,10 @@ class EnhancedTechnicalAnalyzer:
 
                 indicators['price_vs_high_20'] = close.iloc[-1] / high.rolling(20).max().iloc[-1] if high.rolling(20).max().iloc[-1] > 0 else 1
                 indicators['price_vs_low_20'] = close.iloc[-1] / low.rolling(20).min().iloc[-1] if low.rolling(20).min().iloc[-1] > 0 else 1
+
+                # Add momentum alignment indicators
+                momentum_indicators = self.calculate_momentum_alignment(df)
+                indicators.update(momentum_indicators)
 
                 self.regime_history.append(indicators['market_regime'])
                 if len(self.regime_history) > 50:
@@ -281,32 +423,53 @@ class EnhancedTechnicalAnalyzer:
         vol_score = volatility * 100
         
         regime_score = 0
-        if r_squared > 0.6 and abs(trend_score) > 0.1:
-            regime_score = trend_score
-        elif r_squared < 0.3:
-            regime_score = 0
-        else:
-            regime_score = trend_score * 0.5
-        
+        if r_squared > 0.6 and abs(trend_score) > 0.1: # Strong trend condition
+             regime_score = trend_score # Use trend direction
+        elif r_squared < 0.3: # Low R-squared suggests ranging or weak trend
+             regime_score = 0 # Map towards neutral/ranging
+        else: # Moderate R-squared, mixed signals
+             regime_score = trend_score * 0.5 # Weaken trend signal
+
         regime_score = np.clip(regime_score + macro_score, -1, 1)
-        
-        if regime_score > 0.3:
+
+        # --- Ensure output matches the standard set ---
+        # Maybe adjust thresholds slightly based on observation
+        # --- Standardized Classification Logic ---
+        threshold_trend = 0.3 # Example threshold for trend score
+        threshold_ranging_upper = 0.15 # Upper bound for ranging/neutral based on score
+        threshold_ranging_lower = -0.15 # Lower bound for ranging/neutral based on score
+
+        volatility = close.pct_change().rolling(20).std().iloc[-1] # Recalculate or get volatility
+        vol_high_threshold = 0.03
+        vol_low_threshold = 0.01
+
+        # Determine regime based on score and volatility
+        if trend_score > threshold_trend:
             regime = "bull_trend"
-            confidence = min(abs(regime_score), 0.9)
-        elif regime_score < -0.3:
+            confidence = min(abs(trend_score), 0.9) # Confidence based on score strength
+        elif trend_score < -threshold_trend:
             regime = "bear_trend"
-            confidence = min(abs(regime_score), 0.9)
-        elif abs(regime_score) <= 0.2:
-            regime = "ranging"
-            confidence = 0.7
-        else:
-            regime = "neutral"
-            confidence = 0.5
-        
+            confidence = min(abs(trend_score), 0.9)
+        elif volatility >= vol_high_threshold:
+             regime = "high_volatility" # Prioritize high vol over weak trend/ranging
+             confidence = min(volatility / 0.05, 0.8) # Confidence based on vol level
+        elif volatility <= vol_low_threshold and abs(trend_score) < threshold_ranging_upper:
+             regime = "ranging" # Low vol and weak score -> ranging
+             confidence = max(0.6, 1 - abs(trend_score) / threshold_ranging_upper)
+        # --- Explicitly map low absolute scores between ranging bounds to 'neutral' ---
+        elif threshold_ranging_lower <= trend_score <= threshold_ranging_upper:
+             regime = "neutral" # Genuinely weak/mixed signal
+             confidence = 0.5
+        else: # Default case if something unexpected happens
+             regime = "neutral"
+             confidence = 0.4
+
         transition_prob = self._calculate_regime_transition_prob(regime)
-        
+
+        self.logger.debug(f"_detect_market_regime_enhanced: score={trend_score:.3f}, vol={volatility:.4f} -> Regime='{regime}', Conf={confidence:.2f}") # Add debug log
+
         return {
-            'regime': regime,
+            'regime': regime, # Ensure output is one of the standard names
             'confidence': confidence,
             'transition_prob': transition_prob
         }

@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -127,8 +128,60 @@ class MLPredictor:
     def set_database(self, database):
         self.database = database
 
+    # Add to MLPredictor class
+    def should_retrain_model(self, symbol: str, current_accuracy_threshold: float = 0.55) -> bool:
+        """Check if model needs retraining based on performance degradation"""
+        if symbol not in self.model_versions:
+            return True
+            
+        model_info = self.model_versions[symbol]
+        
+        # Check accuracy
+        current_accuracy = model_info.get('accuracy', 0)
+        if current_accuracy < current_accuracy_threshold:
+            self.logger.info(f"Model for {symbol} needs retraining: accuracy {current_accuracy:.3f} < {current_accuracy_threshold}")
+            return True
+            
+        # Check time since last training
+        training_date = model_info.get('training_date')
+        if training_date:
+            if isinstance(training_date, str):
+                try:
+                    training_date = datetime.fromisoformat(training_date.replace('Z', '+00:00'))
+                except ValueError:
+                    training_date = datetime.now()
+            
+            days_since_training = (datetime.now() - training_date).days
+            if days_since_training > 3:  # Retrain every 3 days max
+                self.logger.info(f"Model for {symbol} needs retraining: {days_since_training} days since last training")
+                return True
+                
+        # Check feature drift
+        if symbol in self.real_time_monitor:
+            recent_drift_alerts = self.real_time_monitor[symbol].get('drift_alerts', 0)
+            if recent_drift_alerts > 10:  # Too many drift alerts
+                self.logger.info(f"Model for {symbol} needs retraining: {recent_drift_alerts} drift alerts")
+                return True
+                
+        # Check prediction quality degradation
+        quality_metrics = self._get_current_quality_metrics(symbol)
+        recent_accuracy = quality_metrics.get('recent_accuracy', 1.0)
+        if recent_accuracy < 0.5:  # Recent accuracy below 50%
+            self.logger.info(f"Model for {symbol} needs retraining: recent accuracy {recent_accuracy:.3f} < 0.5")
+            return True
+                
+        return False
+
+    def get_models_needing_retraining(self, accuracy_threshold: float = 0.55) -> List[str]:
+        """Get list of symbols whose models need retraining"""
+        symbols_needing_retraining = []
+        for symbol in list(self.models.keys()):
+            if self.should_retrain_model(symbol, accuracy_threshold):
+                symbols_needing_retraining.append(symbol)
+        return symbols_needing_retraining
+
     def prepare_features_point_in_time(self, df: pd.DataFrame, current_idx: int, lookback: int = 50) -> pd.DataFrame:
-        """Enhanced feature preparation with multi-timeframe features"""
+        """Enhanced feature preparation with volume and regime features"""
         if current_idx < lookback:
             return pd.DataFrame()
 
@@ -142,17 +195,46 @@ class MLPredictor:
         opens = current_data['open'].astype(float)
 
         try:
-            # 1. Multi-timeframe price-based features
+            # 1. Enhanced volume-based features
+            features['volume_momentum'] = volume.iloc[-1] / volume.rolling(10).mean().iloc[-1] if len(volume) > 10 else 1
+            features['volume_acceleration'] = (volume.iloc[-1] - volume.iloc[-5]) / volume.iloc[-5] if len(volume) > 5 else 0
+            
+            # Volume volatility
+            if len(volume) > 20:
+                features['volume_volatility'] = volume.pct_change().rolling(20).std().iloc[-1]
+            else:
+                features['volume_volatility'] = 0
+                
+            # Price-volume correlation
+            if len(close_prices) > 20:
+                price_changes = close_prices.pct_change().tail(20)
+                volume_changes = volume.pct_change().tail(20)
+                features['price_volume_corr'] = price_changes.corr(volume_changes) if not price_changes.isna().all() else 0
+            else:
+                features['price_volume_corr'] = 0
+
+            # 2. Regime-aware features
+            if len(close_prices) > 20:
+                price_change_20 = (close_prices.iloc[-1] - close_prices.iloc[-20]) / close_prices.iloc[-20]
+                features['in_trending_regime'] = 1 if abs(price_change_20) > 0.03 else 0
+                
+                volatility_20 = close_prices.pct_change().rolling(20).std().iloc[-1]
+                features['in_high_vol_regime'] = 1 if volatility_20 > 0.025 else 0
+            else:
+                features['in_trending_regime'] = 0
+                features['in_high_vol_regime'] = 0
+
+            # 3. Existing price-based features (keep your current implementations)
             for period in [1, 3, 5, 10, 20]:
                 if len(close_prices) > period:
                     features[f'returns_{period}'] = close_prices.iloc[-1] / close_prices.iloc[-period-1] - 1
             
-            # 2. Volatility features across multiple timeframes
+            # Volatility features
             for period in [5, 10, 20]:
                 if len(close_prices) > period:
                     features[f'volatility_{period}'] = close_prices.pct_change().rolling(period).std().iloc[-1]
             
-            # 3. Volume features with multiple lookbacks
+            # Volume features
             for period in [5, 10, 20]:
                 if len(volume) > period:
                     features[f'volume_ma_ratio_{period}'] = volume.iloc[-1] / volume.rolling(period).mean().iloc[-1]
@@ -220,7 +302,7 @@ class MLPredictor:
             features['market_micro_1'] = self._calculate_market_microstructure_1(high_prices, low_prices, close_prices, volume)
             features['market_micro_2'] = self._calculate_market_microstructure_2(high_prices, low_prices, close_prices, volume)
             
-            return pd.DataFrame([features])
+            return pd.DataFrame([features]).fillna(0)
             
         except Exception as e:
             if self.error_handler:
@@ -257,29 +339,67 @@ class MLPredictor:
         return targets
 
     def create_enhanced_target(self, df: pd.DataFrame, current_idx: int) -> int:
-        """Create enhanced target using weighted multi-timeframe approach"""
+        """Create enhanced target using dynamic thresholds based on market regime"""
         multi_targets = self.create_multi_timeframe_targets(df, current_idx)
         
         if not multi_targets:
             return 0
         
-        # Weighted voting based on target configurations
+        # Get market regime context
+        close_prices = df['close'].astype(float)
+        if current_idx >= 20:
+            volatility = close_prices.pct_change().rolling(20).std().iloc[current_idx]
+            trend_strength = abs(close_prices.iloc[current_idx] / close_prices.iloc[current_idx-20] - 1)
+        else:
+            volatility = 0.02
+            trend_strength = 0
+        
+        # Weighted voting with regime consideration
         weighted_vote = 0
         total_weight = 0
         
         for i, target in enumerate(multi_targets):
-            weight = self.target_configs[i]['weight']
-            weighted_vote += target * weight
-            total_weight += weight
+            base_weight = self.target_configs[i]['weight']
+            
+            # Adjust weights based on market regime
+            adjusted_weight = base_weight
+            
+            # Increase weight for shorter timeframes in trending markets
+            if trend_strength > 0.04 and self.target_configs[i]['periods'] <= 10:
+                adjusted_weight *= 1.3
+            # Increase weight for medium timeframes in high volatility
+            elif volatility > 0.03 and 10 <= self.target_configs[i]['periods'] <= 20:
+                adjusted_weight *= 1.2
+            # Decrease weight for all timeframes in low volatility ranging markets
+            elif volatility < 0.01 and trend_strength < 0.02:
+                adjusted_weight *= 0.7
+                
+            weighted_vote += target * adjusted_weight
+            total_weight += adjusted_weight
         
-        # Normalize and convert to discrete target
-        if weighted_vote > 0.3:  # Strong bullish consensus
+        if total_weight > 0:
+            normalized_vote = weighted_vote / total_weight
+        else:
+            normalized_vote = 0
+        
+        # Convert to trading signal with regime-aware thresholds
+        if trend_strength > 0.05:  # Strong trend
+            strong_threshold = 0.25
+            weak_threshold = 0.15
+        elif volatility > 0.03:  # High volatility
+            strong_threshold = 0.30
+            weak_threshold = 0.20
+        else:  # Normal conditions
+            strong_threshold = 0.20
+            weak_threshold = 0.10
+        
+        if normalized_vote > strong_threshold:
             return 2  # Strong buy
-        elif weighted_vote > 0.1:  # Moderate bullish
+        elif normalized_vote > weak_threshold:
             return 1  # Buy
-        elif weighted_vote < -0.3:  # Strong bearish consensus
+        elif normalized_vote < -strong_threshold:
             return -2  # Strong sell
-        elif weighted_vote < -0.1:  # Moderate bearish
+        elif normalized_vote < -weak_threshold:
             return -1  # Sell
         else:
             return 0  # Hold
@@ -697,11 +817,22 @@ class MLPredictor:
             return {'success': False, 'reason': str(e)}
 
     def predict_enhanced(self, symbol: str, df: pd.DataFrame) -> Dict:
-        """Enhanced prediction with confidence calibration and multi-class support"""
+        """Enhanced prediction with robust data validation"""
         if symbol not in self.models:
             return self.fallback_prediction_strategy(symbol, df)
             
         try:
+            # --- DATA VALIDATION ---
+            if df is None or len(df) < 50:
+                self.logger.warning(f"Insufficient data for {symbol}: {len(df) if df is not None else 0} rows")
+                return self.fallback_prediction_strategy(symbol, df)
+                
+            # Check for valid close prices
+            close_prices = df['close'].astype(float)
+            if close_prices.isnull().all() or (close_prices == 0).all():
+                self.logger.warning(f"Invalid close prices for {symbol} ML prediction")
+                return self.fallback_prediction_strategy(symbol, df)
+            
             if len(df) < 50:
                 return self.fallback_prediction_strategy(symbol, df)
                 
@@ -1798,3 +1929,146 @@ class MLPredictor:
     def walk_forward_validation(self, symbol: str, df: pd.DataFrame, n_splits: int = None) -> Dict:
         """Main validation method - uses enhanced validation by default"""
         return self.walk_forward_validation_enhanced(symbol, df, n_splits)
+    
+    def update_ml_prediction_outcomes(self, lookback_hours: int = 24):
+        """
+        Periodically checks recent closed trades, determines the actual outcome
+        relative to the ML prediction, and stores it in the prediction_quality table.
+        """
+        if not self.database:
+            self.logger.warning("Database not available, skipping ML outcome update.")
+            return
+
+        self.logger.info(f"Starting ML prediction outcome update (checking last {lookback_hours} hours)...")
+        updated_count = 0
+        failed_count = 0
+        try:
+            # 1. Fetch recently closed trades that haven't been updated yet
+            start_time = datetime.now() - timedelta(hours=lookback_hours)
+            query = """
+                SELECT id, symbol, ml_prediction_details, pnl_percent, timestamp
+                FROM trades
+                WHERE exit_price IS NOT NULL
+                  AND outcome_updated = 0
+                  AND ml_prediction_details IS NOT NULL
+                  AND timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT 100 -- Process in batches
+            """ # Ensure timestamp comparison works with TEXT ISO format
+            params = (start_time.isoformat(),)
+
+            # Use pandas read_sql for easier processing
+            closed_trades_df = pd.read_sql_query(query, self.database.connection, params=params, parse_dates=['timestamp'])
+
+            if closed_trades_df.empty:
+                self.logger.info("No recently closed trades found needing ML outcome update.")
+                return
+
+            self.logger.info(f"Found {len(closed_trades_df)} closed trades to process for ML outcome.")
+
+            for index, trade in closed_trades_df.iterrows():
+                try:
+                    trade_id = trade['id']
+                    pnl_percent = trade['pnl_percent']
+                    ml_details_json = trade['ml_prediction_details']
+                    symbol = trade['symbol']
+
+                    if pd.isna(pnl_percent) or not ml_details_json:
+                        self.logger.warning(f"Skipping trade {trade_id}: Missing PnL ({pnl_percent}) or ML details ({ml_details_json})")
+                        # Mark as updated anyway to avoid reprocessing invalid data
+                        self.database.update_trade_outcome_updated_flag(trade_id)
+                        continue
+
+                    # Parse ML prediction details from JSON
+                    ml_pred_info = json.loads(ml_details_json)
+
+                    # --- Determine Actual Outcome based on PnL ---
+                    # Define a small threshold for 'hold' outcomes
+                    hold_threshold = 0.1 # e.g., +/- 0.1% PnL is considered neutral
+                    actual_outcome = 0
+                    if pnl_percent > hold_threshold:
+                        actual_outcome = 1 # Profit -> Actual 'BUY' direction was correct (or 'SELL' direction was wrong)
+                    elif pnl_percent < -hold_threshold:
+                        actual_outcome = -1 # Loss -> Actual 'SELL' direction was correct (or 'BUY' direction was wrong)
+                    else:
+                        actual_outcome = 0 # Neutral/Hold
+
+                    # --- Extract prediction details ---
+                    # Use the raw prediction score (e.g., -2, -1, 0, 1, 2) if available
+                    raw_prediction = ml_pred_info.get('raw_prediction', ml_pred_info.get('prediction', 0)) # Fallback to final signal
+                    prediction_signal = self._convert_to_trading_signal(raw_prediction) # Ensure it's -1, 0, or 1
+
+                    # Important: Determine 'correctness' based on the *signal*, not the raw score
+                    # Example: Predicted BUY (1), Actual was profit (1) -> Correct
+                    # Example: Predicted SELL (-1), Actual was profit (1) -> Incorrect
+                    # Example: Predicted BUY (1), Actual was loss (-1) -> Incorrect
+                    # Example: Predicted SELL (-1), Actual was loss (-1) -> Correct
+                    # Example: Predicted HOLD (0), Actual was profit/loss (1/-1) -> Incorrect (treat 0 PNL as correct hold?)
+                    # Example: Predicted BUY/SELL (1/-1), Actual was neutral (0) -> Incorrect? Or partially correct? Let's treat as incorrect for simplicity.
+
+                    is_correct = (prediction_signal == actual_outcome)
+
+                    # Get other details needed for store_prediction_quality
+                    pred_confidence = ml_pred_info.get('confidence', 0.5)
+                    pred_model_used = ml_pred_info.get('model_used', 'unknown')
+                    pred_features_used = ml_pred_info.get('features_used', []) # Assuming features were stored
+                    pred_ensemble_used = ml_pred_info.get('ensemble_used', False)
+                    pred_feature_count = ml_pred_info.get('feature_count_used', 0)
+
+                    # Use the prediction timestamp if stored, otherwise fallback to trade timestamp (less accurate)
+                    pred_timestamp_iso = ml_pred_info.get('timestamp')
+                    if pred_timestamp_iso:
+                        # Attempt to parse ISO string back to datetime
+                        try:
+                             pred_timestamp = datetime.fromisoformat(pred_timestamp_iso.replace('Z', '+00:00'))
+                        except:
+                             pred_timestamp = trade['timestamp'] # Fallback
+                    else:
+                        pred_timestamp = trade['timestamp'] # Fallback
+
+                    # 3. Store the prediction quality record
+                    store_success = self.database.store_prediction_quality(
+                        symbol=symbol,
+                        prediction=prediction_signal, # Use the simplified signal
+                        actual=actual_outcome,
+                        confidence=pred_confidence,
+                        # 'correct' will be calculated by store_prediction_quality based on prediction/actual
+                        model_used=pred_model_used,
+                        features_used=pred_features_used,
+                        ensemble_used=pred_ensemble_used,
+                        feature_count=pred_feature_count,
+                        raw_prediction=raw_prediction,
+                        timestamp=pred_timestamp # Pass the timestamp object
+                    )
+
+                    # 4. Mark the trade as updated in the trades table
+                    if store_success:
+                        update_flag_success = self.database.update_trade_outcome_updated_flag(trade_id)
+                        if update_flag_success:
+                            updated_count += 1
+                            self.logger.debug(f"Successfully updated ML outcome for trade {trade_id}")
+                        else:
+                            failed_count += 1
+                            self.logger.warning(f"Stored prediction quality for trade {trade_id}, but failed to update outcome flag.")
+                    else:
+                        failed_count += 1
+                        self.logger.warning(f"Failed to store prediction quality for trade {trade_id}.")
+
+                except json.JSONDecodeError as json_e:
+                    failed_count += 1
+                    self.logger.error(f"Error decoding ML details for trade {trade.get('id', 'N/A')}: {json_e}")
+                    # Mark as updated to avoid retrying bad JSON
+                    self.database.update_trade_outcome_updated_flag(trade.get('id'))
+                except Exception as inner_e:
+                    failed_count += 1
+                    self.logger.error(f"Error processing outcome for trade {trade.get('id', 'N/A')}: {inner_e}", exc_info=True)
+                    # Optionally mark as updated to avoid infinite loops on problematic trades
+                    # self.database.update_trade_outcome_updated_flag(trade.get('id'))
+
+
+            self.logger.info(f"ML prediction outcome update complete. Updated: {updated_count}, Failed/Skipped: {failed_count}")
+
+        except Exception as e:
+            self.logger.error(f"Critical error during ML outcome update process: {e}", exc_info=True)
+            if self.error_handler:
+                self.error_handler.handle_ml_error(e, "ALL", "outcome_update_process")

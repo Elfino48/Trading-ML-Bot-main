@@ -2,7 +2,7 @@ import requests
 import time
 import threading
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 import json
 
 class TelegramBot:
@@ -668,13 +668,16 @@ class TelegramBot:
         """
         self.send_channel_message(message.strip())
     
-    def log_ml_training(self, symbol: str, accuracy: float):
+    def log_ml_training(self, symbol: str, accuracy: float, message_detail: Optional[str] = None):
         message = f"""
 🧠 <b>ML MODEL TRAINED</b>
 
 <b>Symbol:</b> {symbol}
 <b>Accuracy:</b> {accuracy:.1f}%
-
+"""
+        if message_detail:
+                    message += f"<b>Note:</b> {message_detail}\n"
+        message += f"""
 🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
         """
         self.send_channel_message(message.strip())

@@ -880,7 +880,7 @@ class AdvancedRiskManager:
 
     def _get_current_position_symbols(self) -> List[str]:
         try:
-            position_response = self.client.get_position_info()
+            position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if not position_response or position_response.get('retCode') != 0:
                 return []
             
@@ -1147,7 +1147,7 @@ class AdvancedRiskManager:
     
     def get_current_exposure(self) -> float:
         try:
-            positions_response = self.client.get_position_info()
+            positions_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if positions_response and positions_response.get('retCode') == 0:
                 positions = positions_response['result']['list']
                 total_exposure = 0
@@ -1364,7 +1364,7 @@ class AdvancedRiskManager:
                 return {}
                 
             try:
-                positions_response = self.client.get_position_info()
+                positions_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 position_sizes = []
                 if positions_response and positions_response.get('retCode') == 0:
                     positions = positions_response['result']['list']

@@ -380,13 +380,16 @@ class BybitClient:
         return self._request("POST", "/v5/order/cancel-all", params)
 
 
-    def get_position_info(self, symbol: Optional[str] = None, category: str = "linear"): # Match original signature + default category
+    def get_position_info(self, symbol: Optional[str] = None, category: str = "linear", settleCoin: Optional[str] = None): # Added settleCoin
         """Retrieves position information."""
         params = {"category": category}
         if symbol:
             params["symbol"] = symbol
-        # Original code removed the settleCoin logic, stick to that
-        # V5 /v5/position/list returns all for category if no symbol
+        # --- FIX: Include settleCoin in params if provided ---
+        if settleCoin:
+            params["settleCoin"] = settleCoin
+        # --- END FIX ---
+        # V5 /v5/position/list returns all for category if no symbol/settleCoin
         return self._request("GET", "/v5/position/list", params)
 
     def get_ticker(self, symbol: str, category: str = "linear"): # Match original signature + default category

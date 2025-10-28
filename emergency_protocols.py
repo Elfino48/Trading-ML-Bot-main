@@ -239,7 +239,7 @@ class EmergencyProtocols:
         """Verify that all positions are actually closed"""
         try:
             # Get current positions (assuming execution_engine.client has this method)
-            position_response = self.execution_engine.client.get_position_info()
+            position_response = self.execution_engine.client.get_position_info(category="linear", settleCoin="USDT")
             if not position_response or position_response.get('retCode') != 0:
                 return {'success': False, 'error': 'Failed to get position info', 'procedure': 'VERIFY_POSITIONS_CLOSED'}
             

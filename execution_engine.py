@@ -125,7 +125,7 @@ class ExecutionEngine:
         self.logger.info("Initializing position cache via REST...")
         try:
             # Use the client's method directly
-            pos_response = self.client.get_position_info(category="linear")
+            pos_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if pos_response and pos_response.get('retCode') == 0:
                 with self._state_lock:
                     self.position_cache.clear() # Clear existing before refresh
@@ -987,15 +987,29 @@ class ExecutionEngine:
                     self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
 
                     # Prepare Trade Record
-                    trade_record = {**decision}
+                    trade_record = {**decision} # Start with the full decision dict
                     trade_record.update({
-                        'timestamp': time.time(), 'side': side,
+                        'timestamp': time.time(), # Overwrite with execution time
+                        'side': side,
                         'quantity': final_quantity_float, # Store final executed quantity
                         'position_size_usdt': final_size_usdt, # Store final approx size
-                        'entry_price': executed_price, 'order_id': order_id, 'success': True
+                        'entry_price': executed_price,
+                        'order_id': order_id,
+                        'success': True,
+                        # 'ml_prediction_details' is already in decision, so it's included here
                     })
-                    trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
-                    self.trade_history.append(trade_record)
+                    # Remove potentially large/unserializable objects if they exist
+                    trade_record.pop('signals', None)
+                    trade_record.pop('market_context', None)
+                    trade_record.pop('trade_quality', None)
+                    trade_record.pop('technical_indicators', None) # Remove if present
+
+                    self.trade_history.append(trade_record) # Append to local history
+
+                    # --- FIX: Pass the modified trade_record to the database ---
+                    if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                        self.risk_manager.database.store_trade(trade_record)
+                    # --- END FIX ---
 
                     self.logger.info(f"✅ Enhanced trade for {symbol} placed successfully! Order ID: {order_id}")
 
@@ -1023,9 +1037,19 @@ class ExecutionEngine:
                         'position_size_usdt': final_size_usdt, # Log attempted final size
                         'entry_price': None, 'order_id': None, 'success': False,
                         'error_message': f"Code {ret_code}: {error_msg}"
+                        # 'ml_prediction_details' is already in decision
                     })
-                    trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
+                    # Remove potentially large/unserializable objects if they exist
+                    trade_record.pop('signals', None)
+                    trade_record.pop('market_context', None)
+                    trade_record.pop('trade_quality', None)
+                    trade_record.pop('technical_indicators', None)
+
                     self.trade_history.append(trade_record)
+                    # --- FIX: Pass the modified trade_record to the database ---
+                    if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                        self.risk_manager.database.store_trade(trade_record)
+                    # --- END FIX ---
 
                     return {'success': False, 'message': f'Order failed ({ret_code}): {error_msg}'}
 
@@ -1045,9 +1069,19 @@ class ExecutionEngine:
                             'position_size_usdt': size_to_log,
                             'success': False,
                             'error_message': f'Execution Exception: {e}'
+                            # 'ml_prediction_details' is already in decision
                         })
-                        trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
+                        # Remove potentially large/unserializable objects if they exist
+                        trade_record.pop('signals', None)
+                        trade_record.pop('market_context', None)
+                        trade_record.pop('trade_quality', None)
+                        trade_record.pop('technical_indicators', None)
+
                         self.trade_history.append(trade_record)
+                        # --- FIX: Pass the modified trade_record to the database ---
+                        if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                            self.risk_manager.database.store_trade(trade_record)
+                        # --- END FIX ---
                     except: pass
                 return {'success': False, 'message': f'Execution engine error: {e}'}
     
@@ -1180,7 +1214,7 @@ class ExecutionEngine:
             # Fallback to REST API
             self.logger.debug(f"Cache miss or stale for {symbol or 'all'}, fetching via REST...")
             try:
-                response = self.client.get_position_info(symbol) # Use client's method
+                response = self.client.get_position_info(category="linear", settleCoin="USDT") # Use client's method
                 # Optionally update cache here if REST was used? Handled by reconcile.
                 if response and response.get('retCode') == 0:
                     # Update cache upon successful REST fetch for consistency
@@ -1328,7 +1362,7 @@ class ExecutionEngine:
 
             try:
                 # Get initial quantity from REST for safety
-                position_response = self.client.get_position_info(symbol)
+                position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 if not position_response or position_response.get('retCode') != 0:
                     return {'success': False, 'message': 'Failed to get position info for force close'}
                 positions = position_response['result'].get('list', [])
@@ -1364,7 +1398,7 @@ class ExecutionEngine:
                         else:
                             self.logger.warning(f"Force close order placed for {symbol}, but verification failed. Checking remaining size...")
                             # Check remaining size via REST again before next attempt
-                            remaining_pos = self.client.get_position_info(symbol)
+                            remaining_pos = self.client.get_position_info(category="linear", settleCoin="USDT")
                             if remaining_pos and remaining_pos.get('retCode') == 0:
                                 rem_list = remaining_pos['result'].get('list', [])
                                 rem_p = next((p for p in rem_list if p['symbol'] == symbol), None)
@@ -1428,7 +1462,7 @@ class ExecutionEngine:
 
     def _try_reduce_and_close(self, symbol: str) -> Dict:
         try:
-            position_response = self.client.get_position_info(symbol)
+            position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if not position_response or position_response.get('retCode') != 0:
                 return {'success': False}
             
@@ -1474,7 +1508,7 @@ class ExecutionEngine:
 
     def _try_multiple_small_orders(self, symbol: str) -> Dict:
         try:
-            position_response = self.client.get_position_info(symbol)
+            position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if not position_response or position_response.get('retCode') != 0:
                 return {'success': False}
             
@@ -1509,7 +1543,7 @@ class ExecutionEngine:
                     print(f"❌ Failed to place small order {i + 1}: {e}")
                     continue
             
-            remaining_response = self.client.get_position_info(symbol)
+            remaining_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if remaining_response and remaining_response.get('retCode') == 0:
                 remaining_positions = remaining_response['result']['list']
                 remaining_position = next((p for p in remaining_positions if p['symbol'] == symbol), None)
@@ -1539,7 +1573,7 @@ class ExecutionEngine:
 
     def _try_different_order_types(self, symbol: str) -> Dict:
         try:
-            position_response = self.client.get_position_info(symbol)
+            position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
             if not position_response or position_response.get('retCode') != 0:
                 return {'success': False}
             
@@ -1630,7 +1664,7 @@ class ExecutionEngine:
 
                     # 2. If cache doesn't confirm or is old/missing, check REST API
                     self.logger.debug(f"WS cache doesn't confirm closure for {symbol}, checking REST...")
-                    position_response = self.client.get_position_info(symbol)
+                    position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                     if position_response and position_response.get('retCode') == 0:
                         positions = position_response['result'].get('list', [])
                         position = next((p for p in positions if p['symbol'] == symbol), None)
@@ -1796,7 +1830,7 @@ class ExecutionEngine:
                 reconciliation['rest_check_performed'] = True
                 try:
                     self.logger.info("Reconciling positions using REST API...")
-                    actual_positions_response = self.client.get_position_info(category="linear")                    
+                    actual_positions_response = self.client.get_position_info(category="linear", settleCoin="USDT")                
                     if not actual_positions_response or actual_positions_response.get('retCode') != 0:
                         err = actual_positions_response.get('retMsg', 'Unknown') if actual_positions_response else 'No response'
                         reconciliation['errors'].append(f'Failed to get positions via REST: {err}')
@@ -1999,7 +2033,7 @@ class ExecutionEngine:
             self.logger.info(f"Attempting to close position for {symbol}...")
             try:
                 # Get current position details reliably via REST before closing
-                position_response = self.client.get_position_info(symbol)
+                position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 if not position_response or position_response.get('retCode') != 0:
                     # Try checking WS cache as a fallback ONLY if REST fails critically
                     with self._state_lock:

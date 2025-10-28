@@ -72,127 +72,100 @@ class DataEngine:
                 self.error_handler.handle_api_error(e, "start_streams")
 
     def _handle_ws_message(self, message: Dict):
-            """Callback function to process incoming WebSocket messages."""
-            # self.logger.debug(f"Received WS message: {message}") # Optional: Log all messages
-            topic = message.get("topic", "")
-            data = message.get("data", {}) # Data can be dict (ticker) or list (kline)
-            ts_message = message.get('ts', int(time.time() * 1000)) # Message timestamp
+        topic = message.get("topic", "")
+        data = message.get("data", {})
+        ts_message = message.get('ts', int(time.time() * 1000))
 
-            try:
-                with self.data_lock: # Ensure thread-safe updates
-                    if topic.startswith("tickers."):
-                        symbol = topic.split(".")[-1]
-                        if isinstance(data, dict): # Ticker data is a dict
-                            self.latest_tickers[symbol] = {
-                                'timestamp': ts_message, # Use message timestamp
-                                'lastPrice': float(data.get('lastPrice', 0)),
-                                'bid1Price': float(data.get('bid1Price', 0)),
-                                'ask1Price': float(data.get('ask1Price', 0)),
-                                'volume24h': float(data.get('volume24h', 0)),
-                                'turnover24h': float(data.get('turnover24h', 0))
-                            }
-                            # self.logger.debug(f"Updated ticker for {symbol}: {self.latest_tickers[symbol]['lastPrice']}")
+        try:
+            with self.data_lock:
+                if topic.startswith("tickers."):
+                    symbol = topic.split(".")[-1]
+                    if isinstance(data, dict):
+                        self.latest_tickers[symbol] = {
+                            'timestamp': ts_message,
+                            'lastPrice': float(data.get('lastPrice', 0)),
+                            'bid1Price': float(data.get('bid1Price', 0)),
+                            'ask1Price': float(data.get('ask1Price', 0)),
+                            'volume24h': float(data.get('volume24h', 0)),
+                            'turnover24h': float(data.get('turnover24h', 0))
+                        }
+                elif topic.startswith("kline."):
+                    if isinstance(data, list) and len(data) > 0:
+                        parts = topic.split('.')
+                        interval_str = parts[1]
+                        symbol = parts[2]
 
-                    elif topic.startswith("kline."):
-                        if isinstance(data, list) and len(data) > 0: # Kline data comes as a list of dicts
-                            # Extract symbol and interval from topic: kline.15.BTCUSDT
-                            parts = topic.split('.')
-                            interval_str = parts[1]
-                            symbol = parts[2]
+                        if symbol in self.historical_data:
+                            df = self.historical_data[symbol]
 
-                            if symbol in self.historical_data:
-                                df = self.historical_data[symbol] # df now has 'timestamp' as index
+                            for kline_dict in data:
+                                self.logger.debug(f"WS Kline Received Dict: {kline_dict}") # ADDED DEBUG LOG
+                                ts = pd.to_datetime(int(kline_dict.get('start', 0)), unit='ms')
+                                if ts == 0: continue
 
-                                for kline_dict in data: # Iterate through the list of kline dicts
-                                    # --- Access data using dictionary keys ---
-                                    ts = pd.to_datetime(int(kline_dict.get('start', 0)), unit='ms') # Use 'start' time
-                                    if ts == 0: continue # Skip if timestamp is invalid
+                                close_price_str = kline_dict.get('close')
+                                if close_price_str is None or float(close_price_str) <= 0:
+                                    self.logger.warning(f"WS received invalid close price {close_price_str} for {symbol} at {ts}. Skipping update for this kline.")
+                                    continue # Indent this line
+                                
+                                new_kline_data = {
+                                    'timestamp': ts,
+                                    'open': float(kline_dict.get('open', 0)),
+                                    'high': float(kline_dict.get('high', 0)),
+                                    'low': float(kline_dict.get('low', 0)),
+                                    'close': float(close_price_str), # Use the validated price
+                                    'volume': float(kline_dict.get('volume', 0)),
+                                    'turnover': float(kline_dict.get('turnover', 0))
+                                }
+                                
+                                self.logger.debug(f"WS Kline Parsed Data for {ts}: {new_kline_data}") # ADDED DEBUG LOG
 
-                                    new_kline_data = { # Keep timestamp key here for DataFrame creation
-                                        'timestamp': ts,
-                                        'open': float(kline_dict.get('open', 0)),
-                                        'high': float(kline_dict.get('high', 0)),
-                                        'low': float(kline_dict.get('low', 0)),
-                                        'close': float(kline_dict.get('close', 0)),
-                                        'volume': float(kline_dict.get('volume', 0)),
-                                        'turnover': float(kline_dict.get('turnover', 0))
-                                    }
-                                    # --------------------------------------------
+                                if not df.empty and isinstance(df.index, pd.DatetimeIndex) and df.index[-1] == ts:
+                                    last_index_ts = df.index[-1]
+                                    for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
+                                        if col in new_kline_data:
+                                            df.loc[last_index_ts, col] = new_kline_data[col]
+                                    df_updated = df # Reference updated df
 
-                                    # --- FIX 1: Check using df.index ---
-                                    if not df.empty and isinstance(df.index, pd.DatetimeIndex) and df.index[-1] == ts:
-                                        # Update the last row using index
-                                        last_index_ts = df.index[-1]
-                                        # Update relevant fields (O, H, L, C, V, T)
-                                        for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
-                                            if col in new_kline_data:
-                                                # Use .loc with the timestamp index
-                                                df.loc[last_index_ts, col] = new_kline_data[col]
-                                        # self.logger.debug(f"Updated last kline for {symbol} at {ts}")
+                                elif df.empty or (isinstance(df.index, pd.DatetimeIndex) and ts > df.index[-1]):
+                                    new_row_df = pd.DataFrame([new_kline_data])
+                                    was_indexed = isinstance(df.index, pd.DatetimeIndex)
+                                    if was_indexed:
+                                        df_temp = df.reset_index()
+                                    else:
+                                        df_temp = df
 
-                                    # --- FIX 2: Check using df.index ---
-                                    elif df.empty or (isinstance(df.index, pd.DatetimeIndex) and ts > df.index[-1]):
-                                        # --- Appending logic (using previous fix) ---
-                                        new_row_df = pd.DataFrame([new_kline_data]) # timestamp is a column here
+                                    if not df_temp.empty:
+                                        missing_cols = set(df_temp.columns) - set(new_row_df.columns)
+                                        for c in missing_cols: new_row_df[c] = np.nan
+                                        missing_cols_new = set(new_row_df.columns) - set(df_temp.columns)
+                                        for c in missing_cols_new: df_temp[c] = np.nan
 
-                                        was_indexed = isinstance(df.index, pd.DatetimeIndex)
-                                        if was_indexed:
-                                            df_temp = df.reset_index() # Temporarily make timestamp a column
-                                        else:
-                                            # If df is empty, df_temp remains empty
-                                            # If df has columns but no index, use it directly (shouldn't happen with set_index)
-                                            df_temp = df
+                                    df_combined = pd.concat([df_temp, new_row_df], ignore_index=True)
 
-                                        # Ensure columns match before concat, handle missing cols
-                                        if not df_temp.empty:
-                                            missing_cols = set(df_temp.columns) - set(new_row_df.columns)
-                                            for c in missing_cols: new_row_df[c] = np.nan # Use np.nan
-                                            missing_cols_new = set(new_row_df.columns) - set(df_temp.columns)
-                                            for c in missing_cols_new: df_temp[c] = np.nan # Use np.nan
+                                    if 'timestamp' in df_combined.columns:
+                                        df_combined = df_combined.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+                                        df_combined = df_combined.set_index('timestamp')
+                                    else:
+                                        self.logger.error(f"Critical error: 'timestamp' column missing during concat for {symbol}")
+                                        continue
 
-                                        # Concatenate
-                                        df_combined = pd.concat([df_temp, new_row_df], ignore_index=True)
+                                    if len(df_combined) > 1000:
+                                        df_combined = df_combined.iloc[-1000:]
 
-                                        # Drop duplicates based on 'timestamp' column and sort
-                                        # Important: Ensure 'timestamp' column exists before dropping/sorting
-                                        if 'timestamp' in df_combined.columns:
-                                            df_combined = df_combined.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
-                                            # Set 'timestamp' as index AFTER cleaning
-                                            df_combined = df_combined.set_index('timestamp')
-                                            # --- ADD DEBUG ---
-                                            self.logger.info(f"DEBUG handle_ws_append: Set index for {symbol}. Index type: {type(df_combined.index)}, Last: {df_combined.index[-1]}")
-                                            # --- END DEBUG ---
-                                        else:
-                                            # Should not happen if new_row_df always has 'timestamp'
-                                            self.logger.error(f"Critical error: 'timestamp' column missing during concat for {symbol}")
-                                            continue # Skip this kline update
+                                    self.historical_data[symbol] = df_combined
+                                    df_updated = df_combined # Reference updated df
+                                else:
+                                    df_updated = df # No update happened for this kline_dict
 
-                                        # --- End Appending logic ---
 
-                                        # Keep DataFrame size manageable
-                                        if len(df_combined) > 1000:
-                                            df_combined = df_combined.iloc[-1000:]
-
-                                        self.historical_data[symbol] = df_combined # Update the stored DataFrame
-                                        self.logger.info(f"DEBUG: Appended kline for {symbol}. New last index: {df_combined.index[-1]}") # DEBUG Line
-                                        # self.logger.debug(f"Appended new kline for {symbol} at {ts}, new length {len(df_combined)}")
-                                    # else: Kline is older than last stored, ignore
-                            # else: self.logger.warning(f"Received kline for {symbol} but no historical data loaded yet.")
-
-                    # --- Handle Private Stream Data (Example Placeholder) ---
-                    # elif topic == "order":
-                    #     self.logger.info(f"Received order update: {data}")
-                    #     # Pass to ExecutionEngine or handle here
-                    # elif topic == "position":
-                    #     self.logger.info(f"Received position update: {data}")
-                    #     # Pass to RiskManager or handle here
-
-            except Exception as e:
-                # Log the actual error and traceback, DO NOT call handle_api_error
-                self.logger.error(f"Error handling WS message: {type(e).__name__} - {e} | Topic: {topic}", exc_info=True)
-                # You could add a call to a *different* ErrorHandler method if you want, e.g.:
-                # if self.error_handler:
-                #     self.error_handler.handle_internal_processing_error(e, f"ws_handle_{topic}")
+                                # --- ADDED DEBUG LOG (runs after potential update/append) ---
+                                # Check df_updated exists and has data before logging tail
+                                if 'df_updated' in locals() and df_updated is not None and not df_updated.empty:
+                                    self.logger.debug(f"WS Kline Post-Update DF Tail for {symbol}:\n{df_updated.tail(3)}")
+                                # --- END ADDED DEBUG LOG ---
+        except Exception as e:
+            self.logger.error(f"Error handling WS message: {type(e).__name__} - {e} | Topic: {topic}", exc_info=True)
 
     def validate_market_data(self, df: pd.DataFrame) -> bool:
         """Comprehensive market data validation (mostly unchanged)"""
@@ -421,40 +394,43 @@ class DataEngine:
         print(f"✅ Initialized historical base for {successful_initializations}/{len(SYMBOLS)} symbols")
         
     def get_market_data_for_analysis(self, symbol: str) -> Optional[pd.DataFrame]:
-            """Provides a safe copy of the historical data for analysis components."""
-            with self.data_lock:
-                if symbol in self.historical_data:
-                    df_to_return = self.historical_data[symbol] # Get reference
-                    # --- ADD DEBUG ---
-                    if df_to_return is None:
-                        self.logger.warning(f"DEBUG get_market_data: Found None for {symbol} in cache.")
-                        return None
-                    elif df_to_return.empty:
-                        self.logger.warning(f"DEBUG get_market_data: Found empty DataFrame for {symbol} in cache.")
-                        return None
-                    elif not isinstance(df_to_return.index, pd.DatetimeIndex):
-                        self.logger.warning(f"DEBUG get_market_data: DataFrame for {symbol} exists but index is NOT DatetimeIndex. Type: {type(df_to_return.index)}")
-                        # Optionally print df_to_return.info() here
-                        return df_to_return.copy() # Still return copy, main loop check will fail
-                    else:
-                        self.logger.debug(f"DEBUG get_market_data: Returning valid DataFrame copy for {symbol}. Last index: {df_to_return.index[-1]}")
-                        return df_to_return.copy()
-                    # --- END DEBUG ---
+        with self.data_lock:
+            if symbol in self.historical_data:
+                df_to_return = self.historical_data[symbol]
+
+                # --- ADDED DEBUG LOG ---
+                if df_to_return is None:
+                    self.logger.warning(f"get_market_data: Found None for {symbol} in cache.")
+                    return None
+                elif df_to_return.empty:
+                    self.logger.warning(f"get_market_data: Found empty DataFrame for {symbol} in cache.")
+                    return None
+                elif not isinstance(df_to_return.index, pd.DatetimeIndex):
+                    self.logger.warning(f"get_market_data: DataFrame for {symbol} exists but index is NOT DatetimeIndex. Type: {type(df_to_return.index)}")
+                    self.logger.debug(f"get_market_data: Returning CACHED data for {symbol}. Tail BEFORE copy (Invalid Index):\n{df_to_return.tail(3)}") # Log before copy even if index is wrong
+                    return df_to_return.copy()
                 else:
-                    # Attempt to fetch if missing (might happen on startup race condition)
-                    self.logger.warning(f"Data requested for {symbol} but not found in cache, attempting fetch...")
-                    fetched_df = self.get_historical_data(symbol, TIMEFRAME, limit=200) # Fetch default limit
-                    # --- ADD DEBUG ---
-                    if fetched_df is None:
-                        self.logger.warning(f"DEBUG get_market_data: Fetch attempt failed for {symbol}.")
-                    elif fetched_df.empty:
-                        self.logger.warning(f"DEBUG get_market_data: Fetch attempt returned empty DF for {symbol}.")
-                    elif not isinstance(fetched_df.index, pd.DatetimeIndex):
-                        self.logger.warning(f"DEBUG get_market_data: Fetched DF for {symbol} index is NOT DatetimeIndex. Type: {type(fetched_df.index)}")
-                    else:
-                        self.logger.debug(f"DEBUG get_market_data: Fetched valid DF for {symbol}. Last index: {fetched_df.index[-1]}")
-                    # --- END DEBUG ---
-                    return fetched_df # Return whatever was fetched (could be None/empty)
+                    self.logger.debug(f"get_market_data: Returning CACHED data for {symbol}. Tail BEFORE copy:\n{df_to_return.tail(3)}") # Log before copy
+                    return df_to_return.copy()
+                # --- END ADDED DEBUG LOG ---
+
+            else:
+                self.logger.warning(f"Data requested for {symbol} but not found in cache, attempting fetch...")
+                fetched_df = self.get_historical_data(symbol, TIMEFRAME, limit=200)
+
+                # --- ADDED DEBUG LOG ---
+                if fetched_df is None:
+                     self.logger.warning(f"get_market_data: Fetch attempt failed for {symbol}.")
+                elif fetched_df.empty:
+                     self.logger.warning(f"get_market_data: Fetch attempt returned empty DF for {symbol}.")
+                elif not isinstance(fetched_df.index, pd.DatetimeIndex):
+                     self.logger.warning(f"get_market_data: Fetched DF for {symbol} index is NOT DatetimeIndex. Type: {type(fetched_df.index)}")
+                     self.logger.debug(f"get_market_data: Returning FETCHED data for {symbol}. Tail (Invalid Index):\n{fetched_df.tail(3)}") # Log fetched data
+                else:
+                     self.logger.debug(f"get_market_data: Returning FETCHED data for {symbol}. Tail:\n{fetched_df.tail(3)}") # Log fetched data
+                # --- END ADDED DEBUG LOG ---
+
+                return fetched_df # Return whatever was fetched
 
     def get_technicals_for_symbol(self, symbol: str):
         """Get technical indicators for a symbol (interface for strategy orchestrator) - Now uses safe getter"""

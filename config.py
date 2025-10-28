@@ -22,8 +22,10 @@ TELEGRAM_CONFIG = {
     "LOG_LEVEL": os.getenv("TELEGRAM_LOG_LEVEL", "ALL")
 }
 
+DEBUG_MODE = os.getenv("DEBUG_MODE", "True").lower() == "true"
+
 # Trading Parameters
-SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT").split(",")
+SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,TONUSDT").split(",")
 TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "15")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 

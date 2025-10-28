@@ -89,6 +89,8 @@ class TradingDatabase:
                     breakout_score REAL DEFAULT 0,
                     ml_score REAL DEFAULT 0,
                     mtf_score REAL DEFAULT 0,
+                    ml_prediction_details TEXT,       -- << NEW: Store ML prediction JSON
+                    outcome_updated INTEGER DEFAULT 0,  -- << NEW: Flag (0=not updated, 1=updated)
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP -- Store as TEXT (ISO format)
                 )
             ''')
@@ -248,75 +250,93 @@ class TradingDatabase:
             if self.connection: self.connection.rollback()
             raise
 
-    # --- FIX #3: Timestamp/Type Conversion ---
     def store_trade(self, trade_data: Dict[str, Any]) -> bool:
-        """
-        Store a trade record in the database including individual strategy scores
-        """
-        try:
-            cursor = self.connection.cursor()
+            """
+            Store a trade record in the database including individual strategy scores
+            and associated ML prediction details.
+            """
+            try:
+                cursor = self.connection.cursor()
 
-            # --- Convert Timestamp to ISO String ---
-            ts_input = trade_data.get('timestamp', datetime.now())
-            db_timestamp = ts_input.isoformat() if isinstance(ts_input, (datetime, pd.Timestamp)) else datetime.now().isoformat()
+                # --- Convert Timestamp to ISO String ---
+                ts_input = trade_data.get('timestamp', datetime.now())
+                db_timestamp = ts_input.isoformat() if isinstance(ts_input, (datetime, pd.Timestamp)) else datetime.now().isoformat()
 
-            # --- Convert Boolean to String ---
-            db_success = str(trade_data.get('success', False))
+                # --- Convert Boolean to String ---
+                db_success = str(trade_data.get('success', False))
 
-            # --- Prepare data tuple with explicit type casting ---
-            data_tuple = (
-                db_timestamp,
-                str(trade_data.get('symbol', '')),
-                str(trade_data.get('action', '')),
-                float(trade_data.get('quantity', 0.0) or 0.0),
-                float(trade_data.get('entry_price', 0.0) or 0.0),
-                float(trade_data.get('exit_price', 0.0) or 0.0) if trade_data.get('exit_price') is not None else None,
-                float(trade_data.get('position_size_usdt', 0.0) or 0.0),
-                float(trade_data.get('stop_loss', 0.0) or 0.0),
-                float(trade_data.get('take_profit', 0.0) or 0.0),
-                trade_data.get('exit_reason'), # Keep as TEXT
-                float(trade_data.get('pnl_usdt', 0.0) or 0.0) if trade_data.get('pnl_usdt') is not None else None,
-                float(trade_data.get('pnl_percent', 0.0) or 0.0) if trade_data.get('pnl_percent') is not None else None,
-                float(trade_data.get('confidence', 0.0) or 0.0),
-                float(trade_data.get('composite_score', 0.0) or 0.0),
-                float(trade_data.get('risk_reward_ratio', 0.0) or 0.0),
-                str(trade_data.get('aggressiveness', 'moderate')),
-                trade_data.get('order_id'), # Keep as TEXT
-                db_success, # Use converted string boolean
-                trade_data.get('error_message'), # Keep as TEXT
-                float(trade_data.get('trend_score', 0.0) or 0.0),
-                float(trade_data.get('mr_score', 0.0) or 0.0),
-                float(trade_data.get('breakout_score', 0.0) or 0.0),
-                float(trade_data.get('ml_score', 0.0) or 0.0),
-                float(trade_data.get('mtf_score', 0.0) or 0.0)
-            )
+                # --- Convert ML prediction details to JSON ---
+                ml_details = trade_data.get('ml_prediction') # Get the raw dict
+                db_ml_prediction_details = json.dumps(ml_details, cls=NpEncoder) if ml_details else None
 
-            # Ensure SQL matches original schema and tuple order
-            sql = '''
-                INSERT INTO trades (
-                    timestamp, symbol, action, quantity, entry_price, exit_price,
-                    position_size_usdt, stop_loss, take_profit, exit_reason,
-                    pnl_usdt, pnl_percent, confidence, composite_score,
-                    risk_reward_ratio, aggressiveness, order_id, success, error_message,
-                    trend_score, mr_score, breakout_score, ml_score, mtf_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''' # 24 columns, 24 placeholders
+                # --- Prepare data tuple with explicit type casting ---
+                data_tuple = (
+                    db_timestamp,
+                    str(trade_data.get('symbol', '')),
+                    str(trade_data.get('action', '')),
+                    float(trade_data.get('quantity', 0.0) or 0.0),
+                    float(trade_data.get('entry_price', 0.0) or 0.0),
+                    float(trade_data.get('exit_price', 0.0) or 0.0) if trade_data.get('exit_price') is not None else None,
+                    float(trade_data.get('position_size_usdt', 0.0) or 0.0),
+                    float(trade_data.get('stop_loss', 0.0) or 0.0),
+                    float(trade_data.get('take_profit', 0.0) or 0.0),
+                    trade_data.get('exit_reason'), # Keep as TEXT
+                    float(trade_data.get('pnl_usdt', 0.0) or 0.0) if trade_data.get('pnl_usdt') is not None else None,
+                    float(trade_data.get('pnl_percent', 0.0) or 0.0) if trade_data.get('pnl_percent') is not None else None,
+                    float(trade_data.get('confidence', 0.0) or 0.0),
+                    float(trade_data.get('composite_score', 0.0) or 0.0),
+                    float(trade_data.get('risk_reward_ratio', 0.0) or 0.0),
+                    str(trade_data.get('aggressiveness', 'moderate')),
+                    trade_data.get('order_id'), # Keep as TEXT
+                    db_success, # Use converted string boolean
+                    trade_data.get('error_message'), # Keep as TEXT
+                    float(trade_data.get('trend_score', 0.0) or 0.0),
+                    float(trade_data.get('mr_score', 0.0) or 0.0),
+                    float(trade_data.get('breakout_score', 0.0) or 0.0),
+                    float(trade_data.get('ml_score', 0.0) or 0.0),
+                    float(trade_data.get('mtf_score', 0.0) or 0.0),
+                    db_ml_prediction_details # Add the ML details JSON string
+                )
 
-            cursor.execute(sql, data_tuple)
+                # Ensure SQL matches schema and tuple order (25 columns/placeholders now)
+                sql = '''
+                    INSERT INTO trades (
+                        timestamp, symbol, action, quantity, entry_price, exit_price,
+                        position_size_usdt, stop_loss, take_profit, exit_reason,
+                        pnl_usdt, pnl_percent, confidence, composite_score,
+                        risk_reward_ratio, aggressiveness, order_id, success, error_message,
+                        trend_score, mr_score, breakout_score, ml_score, mtf_score,
+                        ml_prediction_details
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''' # 25 columns, 25 placeholders
 
-            self.connection.commit()
-            trade_id = cursor.lastrowid
-            self.logger.info(f"Stored trade #{trade_id} for {trade_data.get('symbol')} with strategy scores")
-            return True
+                cursor.execute(sql, data_tuple)
 
-        except sqlite3.Error as e:
-            self.logger.error(f"SQLite error storing trade: {e} | Data: {trade_data}", exc_info=True)
-            if self.connection: self.connection.rollback()
-            return False
-        except Exception as e:
-            self.logger.error(f"Failed to store trade: {e} | Data: {trade_data}", exc_info=True)
-            if self.connection: self.connection.rollback() # Rollback on general errors too
-            return False
+                self.connection.commit()
+                trade_id = cursor.lastrowid
+                self.logger.info(f"Stored trade #{trade_id} for {trade_data.get('symbol')} with ML details")
+                return True
+
+            except sqlite3.Error as e:
+                self.logger.error(f"SQLite error storing trade: {e} | Data: {trade_data}", exc_info=True)
+                if self.connection: self.connection.rollback()
+                return False
+            except Exception as e:
+                self.logger.error(f"Failed to store trade: {e} | Data: {trade_data}", exc_info=True)
+                if self.connection: self.connection.rollback() # Rollback on general errors too
+                return False
+
+    def update_trade_outcome_updated_flag(self, trade_id: int) -> bool:
+            """ Mark a trade as having its outcome processed for ML feedback. """
+            try:
+                cursor = self.connection.cursor()
+                cursor.execute('UPDATE trades SET outcome_updated = 1 WHERE id = ?', (trade_id,))
+                self.connection.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                self.logger.error(f"Failed to update outcome_updated flag for trade id {trade_id}: {e}", exc_info=True)
+                if self.connection: self.connection.rollback()
+                return False
 
     def update_trade_exit(self, trade_id: int, exit_price: float,
                           pnl_usdt: float, pnl_percent: float, exit_reason: str) -> bool:
