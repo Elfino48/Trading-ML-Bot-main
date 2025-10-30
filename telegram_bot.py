@@ -1,9 +1,10 @@
 import requests
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import json
+import pandas as pd
 
 class TelegramBot:
     def __init__(self, bot_token: str, channel_id: str, allowed_user_ids: List[int] = None):
@@ -15,6 +16,10 @@ class TelegramBot:
         self.command_handlers = {}
         self.running = False
         self.trading_bot = None
+        
+        self.summary_message_id: Optional[int] = None
+        self.summary_updater_thread: Optional[threading.Thread] = None
+        
         self._register_commands()
     
     def set_trading_bot(self, trading_bot):
@@ -51,13 +56,155 @@ class TelegramBot:
                 'disable_web_page_preview': True
             }
             response = requests.post(url, json=payload, timeout=10)
-            return response.status_code == 200
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                if response_data.get('ok'):
+                    return response_data
+            
+            print(f"Error sending Telegram message: {response.text}")
+            return False
         except Exception as e:
             print(f"Error sending Telegram message: {e}")
             return False
     
     def send_channel_message(self, text: str, parse_mode: str = "HTML") -> bool:
         return self.send_message(self.channel_id, text, parse_mode)
+    
+    def _edit_message(self, text: str, message_id: int) -> bool:
+        if message_id is None:
+            return False
+
+        try:
+            url = f"{self.base_url}/editMessageText"
+            payload = {
+                'chat_id': self.channel_id,
+                'message_id': message_id,
+                'text': text,
+                'parse_mode': "HTML",
+                'disable_web_page_preview': True
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                return True
+            else:
+                response_data = response.json()
+                error_desc = response_data.get('description', '')
+                
+                if 'message to edit not found' in error_desc:
+                    print(f"Resetting summary message ID: Message not found.")
+                    self.summary_message_id = None
+                elif 'message is not modified' in error_desc:
+                    pass
+                else:
+                    print(f"Error editing summary message: {response.text}")
+                return False
+
+        except Exception as e:
+            print(f"Exception editing summary message: {e}")
+            self.summary_message_id = None
+            return False
+    
+    def send_or_update_summary_message(self, text: str):
+        if self.summary_message_id is None:
+            try:
+                response_data = self.send_message(self.channel_id, text)
+                if response_data and response_data.get('ok'):
+                    self.summary_message_id = response_data['result']['message_id']
+                    print(f"Created persistent summary message with ID: {self.summary_message_id}")
+            except Exception as e:
+                print(f"Exception sending initial summary message: {e}")
+        else:
+            self._edit_message(text, self.summary_message_id)
+    
+    def _generate_summary_text(self) -> Optional[str]:
+        if not self.trading_bot or not self.trading_bot.database or not self.trading_bot.execution_engine:
+            return "Bot is initializing..."
+
+        lines = []
+        lines.append(f"📊 <b>BOT STATUS & POSITIONS</b> 📊")
+        
+        lines.append("\n--- <b>Open Positions</b> ---")
+        try:
+            open_positions = self.trading_bot.execution_engine.position_cache
+            open_pos_count = 0
+            
+            if open_positions:
+                for symbol, pos in open_positions.items():
+                    pos_size = pos.get('size', 0)
+                    if pos_size > 0:
+                        open_pos_count += 1
+                        side_emoji = "🟢" if pos.get('side', 'Buy') == 'Buy' else "🔴"
+                        pnl = pos.get('unrealisedPnl', 0)
+                        pnl_emoji = "📈" if pnl >= 0 else "📉"
+                        lines.append(f"{side_emoji} <b>{symbol}</b> | Qty: {pos_size} | Entry: ${pos.get('avgPrice', 0):.4f} | PnL: ${pnl:.2f} {pnl_emoji}")
+            
+            if open_pos_count == 0:
+                lines.append("No open positions.")
+                
+        except Exception as e:
+            lines.append(f"Error fetching positions: {e}")
+
+        lines.append("\n--- <b>Closed Stats (Last 24h)</b> ---")
+        try:
+            trades_df = self.trading_bot.database.get_historical_trades(days=1)
+            closed_trades = trades_df[(trades_df['success'] == True) & (trades_df['pnl_percent'].notna())]
+            
+            if closed_trades.empty:
+                lines.append("No closed trades in 24h.")
+            else:
+                grouped = closed_trades.groupby('symbol')
+                for symbol, group in grouped:
+                    total_trades = len(group)
+                    wins = len(group[group['pnl_percent'] > 0])
+                    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+                    avg_pnl = group['pnl_percent'].mean()
+                    
+                    lines.append(f"<b>{symbol}</b>: {wins}/{total_trades} ({win_rate:.0f}%) | Avg PnL: {avg_pnl:.2f}%")
+        except Exception as e:
+            lines.append(f"Error fetching trade stats: {e}")
+
+        lines.append("\n--- <b>Bot Health</b> ---")
+        try:
+             health = self.trading_bot.get_error_summary().get('health_status', 'UNKNOWN')
+             emergency = self.trading_bot.get_emergency_status().get('emergency_mode', False)
+             portfolio_val = self.trading_bot.get_portfolio_value()
+             pnl_percent = self.trading_bot.risk_manager.daily_pnl
+             
+             lines.append(f"Portfolio: <b>${portfolio_val:,.2f}</b> ({pnl_percent:+.2f}%)")
+             lines.append(f"Status: <b>{health}</b> | Emergency: <b>{'🚨 ACTIVE' if emergency else '✅ INACTIVE'}</b>")
+             lines.append(f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        except Exception as e:
+             lines.append(f"Error fetching health: {e}")
+
+        return "\n".join(lines)
+    
+    def _summary_updater_loop(self, interval_seconds: int):
+        print(f"📊 Starting Telegram summary updater... (Interval: {interval_seconds}s)")
+        while self.running:
+            try:
+                summary_text = self._generate_summary_text()
+                if summary_text:
+                    self.send_or_update_summary_message(summary_text)
+                
+                time.sleep(interval_seconds) 
+            
+            except Exception as e:
+                print(f"Error in Telegram summary updater loop: {e}")
+                time.sleep(interval_seconds)
+    
+    def start_summary_updater(self, interval_seconds: int = 600):
+        if self.summary_updater_thread is None or not self.summary_updater_thread.is_alive():
+            self.running = True
+            self.summary_updater_thread = threading.Thread(
+                target=self._summary_updater_loop,
+                args=(interval_seconds,),
+                daemon=True,
+                name="TelegramSummaryUpdater"
+            )
+            self.summary_updater_thread.start()
+            print("📊 Telegram summary updater thread started.")
     
     def get_updates(self):
         try:
@@ -71,6 +218,12 @@ class TelegramBot:
                 data = response.json()
                 if data.get('ok'):
                     return data.get('result', [])
+            return []
+        except requests.exceptions.Timeout:
+            print("⚠️ Telegram get_updates timed out. Retrying...")
+            return []
+        except requests.exceptions.ConnectionError as conn_err:
+            print(f"⚠️ Telegram connection error: {conn_err}. Retrying...")
             return []
         except Exception as e:
             print(f"Error getting Telegram updates: {e}")
@@ -239,19 +392,20 @@ class TelegramBot:
 
 <b>7-Day Performance:</b>
 """
-            if stats:
+            if stats and 'total_trades' in stats:
                 message += f"• Total Trades: {stats.get('total_trades', 0)}\n"
                 message += f"• Win Rate: {stats.get('win_rate', 0):.1f}%\n"
-                message += f"• Avg PnL: {stats.get('avg_pnl', 0):.2f}%\n"
-                message += f"• Total PnL: {stats.get('total_pnl', 0):.2f}%\n"
-                if 'best_trade' in stats:
+                avg_pnl = stats.get('avg_pnl_percent', 0)
+                message += f"• Avg PnL: {avg_pnl:.2f}%\n"
+                
+                if 'best_trade' in stats and stats['best_trade']:
                     message += f"• Best Trade: {stats['best_trade'].get('pnl_percent', 0):.2f}% ({stats['best_trade'].get('symbol', 'N/A')})\n"
-                if 'worst_trade' in stats:
+                if 'worst_trade' in stats and stats['worst_trade']:
                     message += f"• Worst Trade: {stats['worst_trade'].get('pnl_percent', 0):.2f}% ({stats['worst_trade'].get('symbol', 'N/A')})\n"
                 message += "\n<b>Top Performing Symbols:</b>\n"
                 symbol_perf = stats.get('symbol_performance', [])
                 for symbol in symbol_perf[:3]:
-                    message += f"• {symbol.get('symbol')}: {symbol.get('avg_pnl', 0):.2f}% ({symbol.get('trade_count', 0)} trades)\n"
+                    message += f"• {symbol.get('symbol')}: {symbol.get('avg_pnl_percent', 0):.2f}% ({symbol.get('trade_count', 0)} trades)\n"
             else:
                 message += "• No trading data available\n"
             db_stats = self.trading_bot.database.get_trading_statistics(days=30)
@@ -297,9 +451,11 @@ class TelegramBot:
 
 <b>Database Health:</b> ✅ Active
 """
-            if len(trades_7d) > 0:
-                win_rate = (len(trades_7d[trades_7d['pnl_percent'] > 0]) / len(trades_7d)) * 100
-                message += f"• 7-Day Win Rate: {win_rate:.1f}%\n"
+            if not trades_7d.empty:
+                closed_trades_7d = trades_7d[trades_7d['pnl_percent'].notna()]
+                if not closed_trades_7d.empty:
+                    win_rate = (len(closed_trades_7d[closed_trades_7d['pnl_percent'] > 0]) / len(closed_trades_7d)) * 100
+                    message += f"• 7-Day Win Rate (Closed): {win_rate:.1f}%\n"
             message += f"\n⏰ <i>{datetime.now().strftime('%H:%M:%S')}</i>"
             self.send_message(chat_id, message.strip())
         except Exception as e:
@@ -342,33 +498,40 @@ class TelegramBot:
             message = f"""
 📊 <b>PERFORMANCE SUMMARY</b>
 
-<b>Total Trades:</b> {performance.get('total_trades', 0)}
-<b>Win Rate:</b> {performance.get('win_rate', 0):.1f}%
-<b>Average Confidence:</b> {performance.get('avg_confidence', 0):.1f}%
-<b>Average Risk/Reward:</b> {performance.get('avg_risk_reward', 0):.1f}
+<b>Total Trades (Session):</b> {performance.get('total_trades', 0)}
+<b>Win Rate (Session):</b> {performance.get('win_rate', 0):.1f}%
+<b>Average Confidence (Session):</b> {performance.get('avg_confidence', 0):.1f}%
+<b>Average Risk/Reward (Session):</b> {performance.get('avg_risk_reward', 0):.1f}
 <b>Aggressiveness:</b> {performance.get('aggressiveness', 'N/A').upper()}
 """
             try:
                 recent_trades = self.trading_bot.execution_engine.get_trade_history(limit=5)
                 if recent_trades:
-                    message += f"\n<b>Last {len(recent_trades)} Trades:</b>\n"
+                    message += f"\n<b>Last {len(recent_trades)} Trades (Session):</b>\n"
                     for trade in recent_trades[-5:]:
                         success_emoji = "✅" if trade.get('success', False) else "❌"
                         action_emoji = "🟢" if trade.get('side') == 'Buy' else "🔴"
-                        message += f"{success_emoji}{action_emoji} {trade.get('symbol', 'N/A')} - ${trade.get('size_usdt', 0):.2f}\n"
+                        pnl = trade.get('pnl_percent', None)
+                        if pnl is not None:
+                             message += f"{success_emoji}{action_emoji} {trade.get('symbol', 'N/A')} - PnL: {pnl:.2f}%\n"
+                        else:
+                             message += f"{success_emoji}{action_emoji} {trade.get('symbol', 'N/A')} - Size: ${trade.get('position_size_usdt', 0):.2f}\n"
+
             except:
                 pass
-            if 'recent_stats' in performance:
-                stats = performance['recent_stats']
-                if stats:
-                    message += f"\n<b>7-Day Performance:</b>\n"
-                    message += f"• Trades: {stats.get('total_trades', 0)}\n"
-                    message += f"• Win Rate: {stats.get('win_rate', 0):.1f}%\n"
-                    message += f"• Total PnL: {stats.get('total_pnl', 0):.2f}%\n"
-                    symbol_perf = stats.get('symbol_performance', [])
-                    if symbol_perf:
-                        best_symbol = symbol_perf[0]
-                        message += f"• Best Symbol: {best_symbol.get('symbol')} ({best_symbol.get('avg_pnl', 0):.2f}%)\n"
+                
+            db_stats = performance.get('recent_stats', {})
+            if db_stats and 'total_trades' in db_stats:
+                stats = db_stats
+                message += f"\n<b>7-Day DB Performance:</b>\n"
+                message += f"• Trades: {stats.get('total_trades', 0)}\n"
+                message += f"• Win Rate: {stats.get('win_rate', 0):.1f}%\n"
+                message += f"• Avg PnL: {stats.get('avg_pnl_percent', 0):.2f}%\n"
+                symbol_perf = stats.get('symbol_performance', [])
+                if symbol_perf:
+                    best_symbol = max(symbol_perf, key=lambda x: x.get('avg_pnl_percent', 0), default=None)
+                    if best_symbol:
+                        message += f"• Best Symbol: {best_symbol.get('symbol')} ({best_symbol.get('avg_pnl_percent', 0):.2f}%)\n"
             message += f"\n⏰ <i>{datetime.now().strftime('%H:%M:%S')}</i>"
             self.send_message(chat_id, message.strip())
         except Exception as e:
@@ -382,21 +545,34 @@ class TelegramBot:
             self.send_message(chat_id, "Usage: /aggressiveness [conservative|moderate|aggressive|high]")
             return
         new_level = args[0].lower()
-        if self.trading_bot.change_aggressiveness(new_level):
-            self.send_message(chat_id, f"✅ Aggressiveness changed to {new_level.upper()}")
-        else:
-            self.send_message(chat_id, "❌ Invalid aggressiveness level")
+        try:
+            if self.trading_bot.change_aggressiveness(new_level):
+                self.send_message(chat_id, f"✅ Aggressiveness changed to {new_level.upper()}")
+            else:
+                self.send_message(chat_id, "❌ Invalid aggressiveness level")
+        except Exception as e:
+            self.send_message(chat_id, f"❌ Error changing aggressiveness: {e}")
     
     def _handle_trades(self, chat_id: str, args: List[str]):
         if not self.trading_bot:
             self.send_message(chat_id, "❌ Bot not connected")
             return
         try:
-            trades = self.trading_bot.execution_engine.get_trade_history(limit=10)
-            message = "📋 <b>RECENT TRADES</b>\n\n"
-            for trade in trades:
-                emoji = "🟢" if trade.get('success', False) else "🔴"
-                message += f"{emoji} {trade['symbol']} {trade['side']} - ${trade.get('size_usdt', 0):.2f}\n"
+            trades_df = self.trading_bot.database.get_historical_trades(days=1, symbol=None)
+            trades_df = trades_df.head(10)
+            
+            message = "📋 <b>RECENT TRADES (DB - Last 24h)</b>\n\n"
+            if trades_df.empty:
+                message += "No trades found in the last 24h."
+            else:
+                for index, trade in trades_df.iterrows():
+                    emoji = "✅" if trade.get('success', False) else "❌"
+                    action_emoji = "🟢" if trade.get('action') == 'BUY' else "🔴"
+                    pnl = trade.get('pnl_percent', None)
+                    if pd.notna(pnl):
+                         message += f"{emoji}{action_emoji} {trade['symbol']} | PnL: {pnl:.2f}% | {trade['timestamp']}\n"
+                    else:
+                         message += f"{emoji}{action_emoji} {trade['symbol']} | Size: ${trade.get('position_size_usdt', 0):.2f} | {trade['timestamp']}\n"
             self.send_message(chat_id, message)
         except Exception as e:
             self.send_message(chat_id, f"❌ Error getting trades: {e}")
@@ -433,17 +609,25 @@ class TelegramBot:
             return
         try:
             if args and args[0] == 'confirm':
+                self.send_message(chat_id, "🛑 <b>STOP COMMAND CONFIRMED</b>\n\nBot is executing emergency stop...")
                 emergency_result = self.trading_bot.execution_engine.emergency_stop_with_verification()
+                
                 message = "🛑 <b>BOT STOPPED</b>\n\n"
                 if emergency_result.get('success'):
                     message += "✅ All positions closed successfully\n"
                 else:
-                    message += "⚠️ Some positions may still be open\n"
-                message += "🤖 Trading bot has been stopped.\n"
+                    message += "⚠️ Some positions may still be open. Check results:\n"
+                    message += f"<pre>{json.dumps(emergency_result, indent=2)}</pre>\n"
+                    
+                message += "🤖 Trading bot main loop is being terminated.\n"
                 message += "⏰ Use the start script to restart the bot."
                 self.send_message(chat_id, message)
+                
                 if hasattr(self.trading_bot, 'running'):
                     self.trading_bot.running = False
+                
+                self.stop_polling()
+                
             else:
                 self.send_message(
                     chat_id,
@@ -459,10 +643,10 @@ class TelegramBot:
     
     def _handle_symbols(self, chat_id: str, args: List[str]):
         try:
-            from config import SYMBOLS
+            from config import SYMBOLS, TIMEFRAME
             message = "📊 <b>TRADING SYMBOLS</b>\n\n"
             message += f"<b>Total Symbols:</b> {len(SYMBOLS)}\n"
-            message += f"<b>Timeframe:</b> {getattr(self.trading_bot, 'timeframe', '15')}min\n\n"
+            message += f"<b>Timeframe:</b> {TIMEFRAME} min\n\n"
             symbols_per_line = 4
             for i in range(0, len(SYMBOLS), symbols_per_line):
                 line_symbols = SYMBOLS[i:i + symbols_per_line]
@@ -554,18 +738,60 @@ class TelegramBot:
         """
         self.send_message(chat_id, message.strip())
     
+    def _clear_update_queue(self):
+        """
+        Fetches and discards all pending updates to avoid processing old commands.
+        """
+        print("Clearing Telegram update queue...")
+        try:
+            url = f"{self.base_url}/getUpdates"
+            params = {
+                'offset': self.last_update_id + 1,
+                'timeout': 1
+            }
+            response = requests.get(url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ok') and data.get('result'):
+                    updates = data['result']
+                    if updates:
+                        self.last_update_id = updates[-1]['update_id']
+                        print(f"Update queue cleared. Starting from update_id: {self.last_update_id}")
+                    else:
+                        print("No pending updates found.")
+                elif not data.get('ok'):
+                     print(f"Error in getUpdates response: {data.get('description')}")
+            else:
+                print(f"Failed to getUpdates to clear queue: {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error clearing Telegram update queue: {e}. May process old commands.")
+
     def start_polling(self):
         self.running = True
+        
+        self._clear_update_queue()
+
         print("🤖 Telegram command bot started...")
         while self.running:
+            updates = None
             try:
                 updates = self.get_updates()
-                if updates:
-                    self.process_updates(updates)
-                time.sleep(1)
             except Exception as e:
-                print(f"Error in Telegram polling: {e}")
+                print(f"Error in Telegram polling get_updates: {e}")
                 time.sleep(5)
+                continue
+
+            if updates:
+                try:
+                    self.process_updates(updates)
+                except Exception as proc_e:
+                     print(f"Error processing Telegram updates: {proc_e}")
+            
+            time.sleep(1)
+        
+        print("🤖 Telegram command bot stopped.")
     
     def stop_polling(self):
         self.running = False
@@ -594,7 +820,7 @@ class TelegramBot:
         """
         if performance:
             message += f"""
-📈 <b>Performance Summary:</b>
+📈 <b>Performance Summary (Session):</b>
    • Total Trades: {performance.get('total_trades', 0)}
    • Win Rate: {performance.get('win_rate', 0):.1f}%
    • Avg Confidence: {performance.get('avg_confidence', 0):.1f}%
@@ -621,14 +847,14 @@ class TelegramBot:
 <b>Symbol:</b> {symbol}
 <b>Action:</b> {action}
 <b>Quantity:</b> {quantity:.4f}
-<b>Price:</b> ${price:,.2f}
+<b>Price:</b> ${price:,.4f}
 <b>Size:</b> ${size_usdt:,.2f}
 <b>Confidence:</b> {confidence:.1f}%
 <b>Aggressiveness:</b> {aggressiveness.upper()}
 
 <b>Risk Management:</b>
-   • Stop Loss: ${stop_loss:,.2f}
-   • Take Profit: ${take_profit:,.2f}
+   • Stop Loss: ${stop_loss:,.4f}
+   • Take Profit: ${take_profit:,.4f}
    • Risk/Reward: {risk_reward:.1f}:1
 
 🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>

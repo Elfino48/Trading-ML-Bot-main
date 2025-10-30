@@ -109,6 +109,28 @@ class ErrorHandler:
         """
         Handle trading-specific errors with enhanced circuit breaking
         """
+        error_str = str(error).lower()
+        
+        # --- ADD: Check for ignorable errors ---
+        ignorable_errors = [
+            'initial quantity', 'below minimum',  # Insufficient balance errors
+            'stoploss', 'base_price', 'should lower than', 'should higher than'  # Stop loss placement errors
+        ]
+        
+        if any(ignore_pattern in error_str for ignore_pattern in ignorable_errors):
+            # Log as warning but don't count towards error limits
+            self.logger.warning(f"Ignoring trading error for {symbol} {action}: {error}")
+            return {
+                'timestamp': datetime.now(),
+                'type': 'TRADING_ERROR_IGNORED',
+                'symbol': symbol,
+                'action': action,
+                'error': str(error),
+                'handled': True,
+                'ignored': True
+            }
+        # --- END ADD ---
+
         self.error_count += 1
         self.trading_error_count += 1
         self.consecutive_trading_errors += 1
@@ -126,19 +148,19 @@ class ErrorHandler:
         
         self.logger.error(f"Trading Error for {symbol} {action}: {error}")
         
-        # Check for excessive consecutive trading errors
+        # Check for excessive consecutive trading errors (but skip ignored ones)
         if self.consecutive_trading_errors >= self.max_consecutive_trading_errors:
             error_info['circuit_breaker_triggered'] = True
             self._activate_circuit_breaker(f"Too many consecutive trading errors: {self.consecutive_trading_errors}")
         
-        # Check error rate in time window
-        recent_errors = self._get_recent_errors(self.error_time_window)
+        # Check error rate in time window (excluding ignored errors)
+        recent_errors = [e for e in self._get_recent_errors(self.error_time_window) 
+                        if not e.get('ignored', False)]
         if len(recent_errors) >= 5:
             error_info['high_error_rate'] = True
             self._activate_circuit_breaker("High error rate detected in recent window")
         
         # Specific handling for common trading errors
-        error_str = str(error).lower()
         if 'insufficient balance' in error_str:
             error_info['handled'] = True
             error_info['suggestion'] = 'Check account balance and reduce position sizes'
@@ -325,6 +347,8 @@ class ErrorHandler:
         Get summary of current error state
         """
         recent_errors = self.error_history[-10:] if self.error_history else []
+        ignored_errors = [e for e in recent_errors if e.get('ignored', False)]
+        real_errors = [e for e in recent_errors if not e.get('ignored', False)]
         
         return {
             'total_errors': self.error_count,
@@ -332,9 +356,11 @@ class ErrorHandler:
             'trading_errors': self.trading_error_count,
             'ml_errors': self.ml_error_count,
             'data_errors': self.data_error_count,
+            'ignored_errors_count': len(ignored_errors),
             'circuit_breaker_active': self.circuit_breaker,
             'consecutive_trading_errors': self.consecutive_trading_errors,
-            'recent_errors': recent_errors,
+            'recent_errors': real_errors,  # Only show real errors
+            'recent_ignored_errors': ignored_errors,  # Show ignored separately
             'health_status': self.get_health_status()
         }
     
@@ -362,19 +388,19 @@ class ErrorHandler:
         if self.circuit_breaker:
             return False
         
-        # Too many errors in short period
-        if self.error_count >= self.max_errors_before_stop:
+        # Count only non-ignored errors
+        non_ignored_errors = [e for e in self.error_history 
+                            if not e.get('ignored', False)]
+        
+        # Too many errors in short period (excluding ignored ones)
+        if len(non_ignored_errors) >= self.max_errors_before_stop:
             self._activate_circuit_breaker("Maximum error threshold exceeded")
             return False
         
-        # Check consecutive trading errors
-        if self.consecutive_trading_errors >= self.max_consecutive_trading_errors:
-            self._activate_circuit_breaker("Too many consecutive trading errors")
-            return False
-        
-        # Check error rate (if we have timing data)
-        recent_errors = self._get_recent_errors(300)  # 5 minutes
-        if len(recent_errors) >= 5:
+        # Check consecutive trading errors (excluding ignored ones)
+        recent_non_ignored = [e for e in self._get_recent_errors(300) 
+                            if not e.get('ignored', False)]
+        if len(recent_non_ignored) >= 5:
             self._activate_circuit_breaker("High error rate detected")
             return False
         

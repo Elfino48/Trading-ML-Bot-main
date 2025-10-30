@@ -991,42 +991,15 @@ class EnhancedStrategyOrchestrator:
     
     def analyze_symbol_aggressive(self, symbol: str, historical_data: pd.DataFrame,
                             portfolio_value: float, aggressiveness: str = None) -> Dict:
-    
+
         if aggressiveness is None:
             aggressiveness = self.aggressiveness
 
-        quality_report = self._check_data_quality(symbol, historical_data)
-        if not quality_report['is_usable']:
-            self.logger.error(f"Data quality issues for {symbol}: {quality_report['data_issues']}")
-            return self._create_fallback_decision(symbol, f"Data quality: {quality_report['data_issues']}")
-
-        # --- CRITICAL FIX: Validate historical data before processing ---
-        if historical_data is None or historical_data.empty:
-            self.logger.error(f"Historical data is None or empty for {symbol}")
-            return self._create_fallback_decision(symbol, "No historical data")
-        
-        # Check if close prices are valid
-        close_prices = historical_data['close'].astype(float)
-        if close_prices.isnull().all() or (close_prices == 0).all():
-            self.logger.error(f"Invalid close prices for {symbol}: all zeros or NaN")
-            return self._create_fallback_decision(symbol, "Invalid price data")
-        
-        # Get analysis price from the LAST valid close price
-        valid_closes = close_prices[close_prices > 0].dropna()
-        if valid_closes.empty:
-            self.logger.error(f"No valid close prices found for {symbol}")
-            return self._create_fallback_decision(symbol, "No valid prices")
-        
-        analysis_price = valid_closes.iloc[-1]
-        
-        # Log data quality issues
-        if len(valid_closes) < len(close_prices):
-            self.logger.warning(f"Data quality issue for {symbol}: {len(close_prices) - len(valid_closes)} invalid prices")
-
-        analysis_price_fallback = historical_data['close'].iloc[-1] if historical_data is not None and not historical_data.empty else 0
-        fallback_decision = {
+        # Define the base structure for fallback *before* the main try block
+        # This helps ensure all keys exist, even if values are defaults
+        base_fallback = {
             'symbol': symbol,
-            'current_price': analysis_price_fallback,
+            'current_price': 0.0, # Will be updated later
             'action': 'HOLD', 'confidence': 0, 'composite_score': 0,
             'trend_score': 0, 'mr_score': 0, 'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0,
             'position_size': 0, 'quantity': 0, 'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0,
@@ -1036,10 +1009,27 @@ class EnhancedStrategyOrchestrator:
             'trade_quality': {'quality_score': 0, 'quality_rating': 'POOR'},
             'market_context': {}, 'timestamp': pd.Timestamp.now(),
             'technical_indicators': {},
-            'analysis_error': None
+            'analysis_error': None,
+            'analysis_price': 0.0 # Will be updated
         }
 
-        indicators = {}
+
+        quality_report = self._check_data_quality(symbol, historical_data)
+        if not quality_report['is_usable']:
+            self.logger.error(f"Data quality issues for {symbol}: {quality_report['data_issues']}")
+            error_fallback = base_fallback.copy() # Start with base structure
+            error_fallback['analysis_error'] = f"Data quality: {quality_report['data_issues']}"
+            error_fallback['timestamp'] = pd.Timestamp.now()
+            # Try to get current price for logging context
+            try: error_fallback['current_price'] = self.data_engine.get_current_price(symbol)
+            except: pass
+            self._log_cycle_details(error_fallback)
+            return error_fallback
+
+
+        indicators = {} # Define indicators dict outside try block for scope in except/finally
+        analysis_price = 0.0 # Define analysis_price outside try block
+
         try:
             if historical_data is None or historical_data.empty:
                 raise ValueError(f"Insufficient historical data (empty/None) for {symbol}")
@@ -1051,26 +1041,48 @@ class EnhancedStrategyOrchestrator:
 
             analysis_price = valid_closes.iloc[-1] # Use the last VALID price
 
-            if analysis_price <= 0: # Redundant check, but safe
-                raise ValueError(f"Analysis price is non-positive ({analysis_price}) after validation for {symbol}")
+            if analysis_price <= 0:
+                 raise ValueError(f"Analysis price is non-positive ({analysis_price}) after validation for {symbol}")
 
             self.logger.debug(f"[{symbol}] Using validated analysis_price: {analysis_price:.4f}")
-            # --- END CRITICAL FIX ---
 
-            # Now proceed with indicator calculations using the validated 'historical_data'
-            # and ensure 'analysis_price' is passed correctly if needed elsewhere.
+            if len(valid_closes) < len(close_prices):
+                self.logger.warning(f"Data quality issue for {symbol}: {len(close_prices) - len(valid_closes)} invalid prices")
 
-            # indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
-            # Pass the validated analysis_price explicitly if indicators need it,
-            # otherwise ensure indicator calculations handle the data correctly.
-            indicators = self.technical_analyzer.calculate_regime_indicators(historical_data) # Assuming this uses the df's close
+
+            if historical_data is None or len(historical_data) < 100:
+                raise ValueError(f"Insufficient historical data length for {symbol}")
+
+
+            indicators = self.technical_analyzer.calculate_regime_indicators(historical_data)
             if not indicators:
                 raise ValueError(f"Technical indicator calculation failed for {symbol}")
 
-            # Ensure the validated analysis_price is added to indicators dict AFTER calculation
+
             indicators['symbol'] = symbol
             indicators['analysis_price'] = analysis_price
-            indicators['close'] = analysis_price # Make sure 'close' in indicators reflects the valid price
+            indicators['close'] = analysis_price
+
+
+            volume_ok, volume_reason = self._should_trade_with_volume(indicators)
+            if not volume_ok:
+                self.logger.warning(f"[{symbol}] Volume filter triggered HOLD: {volume_reason}")
+                # --- CORRECTED FALLBACK CREATION ---
+                volume_fallback = base_fallback.copy() # Start fresh
+                volume_fallback['action'] = 'HOLD'
+                volume_fallback['analysis_notes'] = f'Volume filter: {volume_reason}'
+                volume_fallback['confidence'] = 0
+                volume_fallback['composite_score'] = 0 # Explicitly zero
+                # Populate with calculated data
+                volume_fallback['technical_indicators'] = indicators
+                volume_fallback['timestamp'] = pd.Timestamp.now()
+                volume_fallback['current_price'] = self.data_engine.get_current_price(symbol)
+                volume_fallback['analysis_price'] = analysis_price # Use the VALID analysis price
+                # Keep other scores/SL/TP etc as zero/default from base_fallback
+                self._log_cycle_details(volume_fallback)
+                return volume_fallback
+                # --- END CORRECTED FALLBACK ---
+
 
             signals = self.technical_analyzer.generate_enhanced_signals(indicators)
             ml_result = self.ml_predictor.predict(symbol, historical_data)
@@ -1082,19 +1094,16 @@ class EnhancedStrategyOrchestrator:
             )
             composite_score = score_results['composite_score']
 
-            # ADD SIGNAL CONSISTENCY CHECK
             alignment_ok, alignment_direction, alignment_strength = self._check_signal_alignment(score_results)
             if not alignment_ok:
-                # Reduce confidence for mixed signals but don't necessarily HOLD
                 confidence_reduction = 0.6 if alignment_strength < 0.3 else 0.8
             else:
                 confidence_reduction = 1.0
 
             action, confidence = self._determine_aggressive_action(
-                composite_score, signals, ml_result, aggressiveness
+                composite_score, indicators, ml_result, aggressiveness
             )
-            
-            # Apply alignment-based confidence adjustment
+
             confidence = confidence * confidence_reduction
 
             latest_price = self.data_engine.get_current_price(symbol)
@@ -1118,12 +1127,10 @@ class EnhancedStrategyOrchestrator:
             else:
                 sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
 
-            # Replace the existing trade_quality line with:
+
             market_context = self._analyze_market_context(indicators, historical_data)
-            # REPLACE the existing trade_quality line with the enhanced version:
             trade_quality = self._assess_signal_quality_enhanced(indicators, signals, ml_result, action, composite_score)
 
-            # Build the decision dictionary FIRST
             decision = {
                 'symbol': symbol,
                 'current_price': latest_price,
@@ -1145,7 +1152,7 @@ class EnhancedStrategyOrchestrator:
                 'market_regime': indicators.get('market_regime', 'neutral'),
                 'volatility_regime': volatility_regime,
                 'aggressiveness': aggressiveness,
-                'trade_quality': trade_quality,  # This is now the ENHANCED version
+                'trade_quality': trade_quality,
                 'market_context': market_context,
                 'timestamp': pd.Timestamp.now(),
                 'analysis_price': analysis_price,
@@ -1157,21 +1164,21 @@ class EnhancedStrategyOrchestrator:
                 }
             }
 
-            # Apply regime-aware filters
+
             decision = self._apply_regime_aware_filters(decision, indicators)
 
-            # THEN determine execution (AFTER regime filters)
+
             should_execute, execute_reason = self._should_execute_trade(decision)
 
-            # Add execution decision to the final decision
+
             decision['should_execute'] = should_execute
             decision['execute_reason'] = execute_reason
 
-            # Log the FINAL decision with execution info
             self._log_cycle_details(decision)
 
             if self.database and action != 'HOLD':
                 db_event_data = {k: v for k, v in decision.items() if k not in ['signals', 'ml_prediction', 'market_context', 'trade_quality', 'technical_indicators']}
+                db_event_data['portfolio_value_at_decision'] = portfolio_value
                 self.database.store_system_event("TRADING_DECISION", db_event_data, "INFO", "Strategy Analysis")
 
             return decision
@@ -1183,12 +1190,19 @@ class EnhancedStrategyOrchestrator:
             if self.error_handler:
                 self.error_handler.handle_trading_error(e, symbol, "aggressive_analysis")
 
-            fallback_decision['analysis_error'] = str(e)
-            fallback_decision['technical_indicators'] = indicators if 'indicators' in locals() and indicators else {}
-            fallback_decision['timestamp'] = pd.Timestamp.now()
-            self._log_cycle_details(fallback_decision)
+            # Use the base fallback structure and populate known values
+            error_fallback = base_fallback.copy()
+            error_fallback['analysis_error'] = str(e)
+            error_fallback['technical_indicators'] = indicators # Include indicators if calculated before error
+            error_fallback['timestamp'] = pd.Timestamp.now()
+            # Try to get current price for logging context
+            try: error_fallback['current_price'] = self.data_engine.get_current_price(symbol)
+            except: pass
+            error_fallback['analysis_price'] = analysis_price if analysis_price > 0 else 0.0 # Use calculated analysis_price if valid
 
-            return fallback_decision
+            self._log_cycle_details(error_fallback)
+
+            return error_fallback
     
     def calculate_dynamic_weights(self, market_regime: str, volatility: float, recent_performance: dict, aggressiveness: str) -> Dict[str, float]:
         
@@ -1461,56 +1475,60 @@ class EnhancedStrategyOrchestrator:
         drawdown = (cumulative - running_max) / running_max
         return drawdown.min() * 100  # Return as percentage
 
+    # In enhanced_strategy_orchestrator.py
     def _should_trade_with_volume(self, indicators: Dict) -> Tuple[bool, str]:
-        """Enhanced volume filter with market regime awareness"""
-        volume_ratio = indicators.get('volume_ratio', 1)
-        volume_sma = indicators.get('volume_sma_20', 0)
+        """Enhanced volume filter - Relaxed current volume check"""
         current_volume = indicators.get('volume', 0)
+        volume_ratio = indicators.get('volume_ratio', 1) # This now uses the last completed candle
+        volume_sma = indicators.get('volume_sma_20', 0) # This is SMA excluding current
         market_regime = indicators.get('market_regime', 'neutral')
         volatility_regime = indicators.get('volatility_regime', 'normal')
-        
-        # Absolute volume check
-        if current_volume <= 0:
-            return False, "Zero or negative volume"
-        
-        # Market regime-aware volume thresholds
+
+        # Absolute volume check - Keep this basic check
+        if current_volume <= 0 and volume_sma <= 0:
+            return False, "Zero or negative current volume AND average volume"
+
+        # Market regime-aware volume thresholds (using volume_ratio relative to SMA)
         if market_regime == 'ranging':
-            min_volume_ratio = 0.3  # Lower threshold for ranging markets
-            min_volume_sma_ratio = 0.6
+            min_volume_ratio = 0.3
         elif market_regime in ['bull_trend', 'bear_trend']:
-            min_volume_ratio = 0.5  # Higher threshold for trending markets
-            min_volume_sma_ratio = 0.8
-        else:
-            min_volume_ratio = 0.4  # Default threshold
-            min_volume_sma_ratio = 0.7
-        
-        # Volume ratio check
+            min_volume_ratio = 0.5
+        else: # neutral or other
+            min_volume_ratio = 0.4
+
+        # --- PRIMARY CHECK: Volume ratio (Last Completed Candle vs SMA) ---
         if volume_ratio < min_volume_ratio:
-            return False, f"Low volume ratio: {volume_ratio:.3f} < {min_volume_ratio} (regime: {market_regime})"
-        
-        # Volume SMA ratio check (current volume vs historical average)
-        if volume_sma > 0:
-            volume_sma_ratio = current_volume / volume_sma
-            if volume_sma_ratio < min_volume_sma_ratio:
-                return False, f"Low volume vs historical: {volume_sma_ratio:.3f} < {min_volume_sma_ratio}"
-        
-        # Volume trend check
-        if 'volume_trend' in indicators and indicators['volume_trend'] < -0.1:
-            return False, f"Declining volume trend: {indicators['volume_trend']:.2f}"
-        
-        # OBV confirmation
-        if 'obv_trend' in indicators and indicators['obv_trend'] < 0:
-            return False, f"Negative OBV trend: {indicators['obv_trend']:.2f}"
-        
-        # Volume volatility check (avoid erratic volume)
+            return False, f"Low volume ratio vs recent average: {volume_ratio:.3f} < {min_volume_ratio} (regime: {market_regime})"
+        # --- END PRIMARY CHECK ---
+
+
+        # --- REMOVED the volume_sma_ratio check that used current_volume ---
+        # if current_volume > 0 and volume_sma > 0:
+        #     volume_sma_ratio = current_volume / volume_sma
+        #     if volume_sma_ratio < min_volume_sma_ratio:
+        #         return False, f"Low current volume vs historical SMA: {volume_sma_ratio:.3f} < {min_volume_sma_ratio}"
+        # --- END REMOVAL ---
+
+
+        # OBV confirmation (Keep as is)
+        if 'obv_trend' in indicators and indicators['obv_trend'] < 0 and market_regime == 'bull_trend':
+             return False, f"Negative OBV trend contradicts bull regime: {indicators['obv_trend']:.2f}"
+        if 'obv_trend' in indicators and indicators['obv_trend'] > 0 and market_regime == 'bear_trend':
+             # Allow OBV contradiction in bear trend if volume ratio is strong enough? Optional relaxation.
+             # Let's keep the check for now as it flagged XRP correctly.
+             return False, f"Positive OBV trend contradicts bear regime: {indicators['obv_trend']:.2f}"
+
+
+        # Volume volatility check (Keep as is)
         volume_volatility = indicators.get('volume_volatility', 0)
-        if volume_volatility > 2.0:  # Too volatile volume
+        if volume_volatility > 2.5:
             return False, f"Erratic volume volatility: {volume_volatility:.2f}"
-        
-        # Volume-regime alignment check
-        if market_regime in ['bull_trend', 'bear_trend'] and volume_ratio < 0.7:
-            return False, f"Low volume for trending market: {volume_ratio:.3f} (regime: {market_regime})"
-        
+
+        # Volume-regime alignment check (Keep as is - uses volume_ratio)
+        if market_regime in ['bull_trend', 'bear_trend'] and volume_ratio < 0.6:
+            return False, f"Low volume ratio confirmation for trending market: {volume_ratio:.3f} (regime: {market_regime})"
+
+
         return True, f"Volume conditions acceptable (ratio: {volume_ratio:.3f}, regime: {market_regime})"
 
     def _calculate_aggressive_composite_score(self, indicators: Dict, signals: Dict, 
@@ -1523,6 +1541,8 @@ class EnhancedStrategyOrchestrator:
                 indicators.get('symbol', 'UNKNOWN'), indicators, None
             )
             
+            ml_weight_multiplier = 0.5 # Reduce ML weight by 50%
+
             # Use optimized weights if available, otherwise fallback to aggressiveness-based weights
             if optimized_weights and any(optimized_weights.values()):
                 weights = optimized_weights
@@ -1554,6 +1574,20 @@ class EnhancedStrategyOrchestrator:
                         'trend_following': 0.40, 'mean_reversion': 0.30,
                         'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10
                     }
+
+            original_ml_weight = weights.get('ml_prediction', 0)
+            reduced_ml_weight = original_ml_weight * ml_weight_multiplier
+            weights['ml_prediction'] = reduced_ml_weight
+            weight_difference = original_ml_weight - reduced_ml_weight
+
+            # Distribute the reduced weight proportionally among other strategies
+            other_weights_total = sum(w for k, w in weights.items() if k != 'ml_prediction')
+            if other_weights_total > 0 and weight_difference > 0:
+                for k in weights:
+                    if k != 'ml_prediction':
+                        proportion = weights[k] / other_weights_total
+                        weights[k] += weight_difference * proportion
+            self.logger.debug(f"[{indicators.get('symbol', 'UNK')}] Weights after ML reduction & re-normalization: {weights}")
 
             # Calculate individual strategy scores
             trend_score = self._trend_following_strategy(indicators)

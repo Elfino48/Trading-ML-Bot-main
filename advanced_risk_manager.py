@@ -4,11 +4,12 @@ from scipy.stats import pearsonr, norm
 from typing import Dict, List
 import time
 import psutil
-from config import RiskConfig
+from config import RiskConfig, RISK_MULTIPLIER
 
 class AdvancedRiskManager:
     def __init__(self, bybit_client, aggressiveness: str = "conservative", error_handler=None, database=None, symbol_to_sector=None):
         self.client = bybit_client
+        self.risk_multiplier = RISK_MULTIPLIER
         self.positions = {}
         self.portfolio = {}
         self.correlation_matrix = {}
@@ -384,6 +385,8 @@ class AdvancedRiskManager:
             max_size = config["max_position_size_usdt"]
             
             final_size = max(min_size, min(position_size, max_size))
+            
+            final_size = final_size * self.risk_multiplier
             
             quantity = final_size / current_price if current_price > 0 else 0
             
@@ -992,125 +995,131 @@ class AdvancedRiskManager:
             }
 
     def can_trade(self, symbol: str, size_usdt: float, market_data: Dict = None) -> Dict:
+        MIN_ORDER_VALUE_USDT = 5.0
         try:
             approval = {
                 'approved': False,
                 'reason': '',
                 'adjusted_size': 0
             }
-            
+
             if self.circuit_breaker:
                 approval['reason'] = f"Circuit breaker active after {self.consecutive_losses} consecutive losses"
-                
                 if self.database:
-                    self.database.store_system_event(
-                        "CIRCUIT_BREAKER_BLOCK",
-                        {
-                            'symbol': symbol,
-                            'consecutive_losses': self.consecutive_losses,
-                            'size_requested': size_usdt
-                        },
-                        "WARNING",
-                        "Risk Management"
-                    )
-                
+                    self.database.store_system_event("CIRCUIT_BREAKER_BLOCK", {'symbol': symbol, 'consecutive_losses': self.consecutive_losses, 'size_requested': size_usdt}, "WARNING", "Risk Management")
                 return approval
-            
+
             self.update_daily_pnl()
-            
+
             if self.daily_pnl <= -self.max_daily_loss_percent:
                 approval['reason'] = f"Daily loss limit reached: {self.daily_pnl:.2f}% (max: {self.max_daily_loss_percent}%)"
-                
                 if self.database:
-                    self.database.store_system_event(
-                        "DAILY_LOSS_LIMIT_BLOCK",
-                        {
-                            'symbol': symbol,
-                            'daily_pnl': self.daily_pnl,
-                            'max_daily_loss': self.max_daily_loss_percent,
-                            'size_requested': size_usdt
-                        },
-                        "WARNING",
-                        "Risk Management"
-                    )
-                
+                    self.database.store_system_event("DAILY_LOSS_LIMIT_BLOCK", {'symbol': symbol, 'daily_pnl': self.daily_pnl, 'max_daily_loss': self.max_daily_loss_percent, 'size_requested': size_usdt}, "WARNING", "Risk Management")
                 return approval
-                
-            if size_usdt > self.max_position_size_usdt:
-                approval['adjusted_size'] = self.max_position_size_usdt
-                approval['reason'] = f"Position size capped at {self.max_position_size_usdt} USDT"
+
+            adjusted_size = size_usdt
+            
+            scaled_max_position_size = self.max_position_size_usdt * self.risk_multiplier
+
+            if adjusted_size > scaled_max_position_size:
+                adjusted_size = scaled_max_position_size
+                approval['reason'] = f"Position size capped by max_position_size_usdt (x{self.risk_multiplier}): ${scaled_max_position_size:.2f}"
             else:
-                approval['adjusted_size'] = size_usdt
-                
+                approval['reason'] = "Initial size within limits"
+
             try:
                 wallet_balance = self.client.get_wallet_balance()
                 if wallet_balance and wallet_balance.get('retCode') == 0:
                     total_equity = float(wallet_balance['result']['list'][0]['totalEquity'])
-                    
+
                     max_risk_percent = self.config["base_size_percent"] * 2
-                    max_risk_per_trade = total_equity * max_risk_percent
-                    if size_usdt > max_risk_per_trade:
-                        approval['adjusted_size'] = min(approval['adjusted_size'], max_risk_per_trade)
-                        approval['reason'] = f"Position size limited to {max_risk_percent*100}% of equity: {max_risk_per_trade:.2f} USDT"
-                        
+                    
+                    max_risk_per_trade = (total_equity * max_risk_percent) * self.risk_multiplier
+
+                    if adjusted_size > max_risk_per_trade:
+                        adjusted_size = max_risk_per_trade
+                        approval['reason'] = f"Position size limited by max risk per trade (x{self.risk_multiplier}): ${max_risk_per_trade:.2f}"
+
                     current_exposure = self.get_current_exposure()
                     max_exposure_percent = 0.3
-                    if current_exposure + size_usdt > total_equity * max_exposure_percent:
+                    if current_exposure + adjusted_size > total_equity * max_exposure_percent:
                         available_exposure = max(0, total_equity * max_exposure_percent - current_exposure)
-                        approval['adjusted_size'] = min(approval['adjusted_size'], available_exposure)
+                        adjusted_size = available_exposure
                         approval['reason'] = f"Position size limited by portfolio exposure: ${available_exposure:.2f} available"
-                        
+
             except Exception as e:
-                print(f"Error checking wallet balance for risk management: {e}")
-                if self.error_handler:
-                    self.error_handler.handle_api_error(e, "wallet_balance_check")
-            
+                self.logger.warning(f"Error checking wallet balance/exposure in can_trade: {e}")
+                pass
+
+
             correlation_data = self.correlation_matrix
             if market_data and 'correlation_matrix' in market_data:
                 correlation_data = market_data['correlation_matrix']
-                
-            correlation_check = self.portfolio_correlation_limits(symbol, approval['adjusted_size'], {'correlation_matrix': correlation_data})
 
+            correlation_check = self.portfolio_correlation_limits(symbol, adjusted_size, {'correlation_matrix': correlation_data})
             if not correlation_check['approved']:
-                approval['approved'] = False
-                approval['reason'] = correlation_check['reason']
-                approval['adjusted_size'] = correlation_check.get('suggested_size', 0)
-                if approval['adjusted_size'] > 0:
-                    approval['approved'] = True
-            
-            sector_check = self._check_sector_exposure(symbol, approval['adjusted_size'])
-            if not sector_check['approved']:
-                approval['approved'] = False
-                approval['reason'] = sector_check['reason']
-                approval['adjusted_size'] = sector_check.get('suggested_size', 0)
-                if approval['adjusted_size'] > 0:
-                    approval['approved'] = True
-            
-            approval['approved'] = approval.get('approved') or approval['adjusted_size'] > 0
+                suggested_size_corr = correlation_check.get('suggested_size', 0)
+                if suggested_size_corr < adjusted_size:
+                     adjusted_size = suggested_size_corr
+                     approval['reason'] = correlation_check['reason'] + f", adjusted size to ${adjusted_size:.2f}"
+                else:
+                     approval['reason'] = correlation_check['reason']
+                     approval['adjusted_size'] = 0
+                     return approval
 
-            if self.database and approval['approved']:
+
+            sector_check = self._check_sector_exposure(symbol, adjusted_size)
+            if not sector_check['approved']:
+                 suggested_size_sector = sector_check.get('suggested_size', 0)
+                 if suggested_size_sector < adjusted_size:
+                      adjusted_size = suggested_size_sector
+                      approval['reason'] = sector_check['reason'] + f", adjusted size to ${adjusted_size:.2f}"
+                 else:
+                      approval['reason'] = sector_check['reason']
+                      approval['adjusted_size'] = 0
+                      return approval
+
+
+            if adjusted_size < MIN_ORDER_VALUE_USDT:
+                approval['approved'] = False
+                approval['reason'] = f"Final adjusted size ${adjusted_size:.2f} is below minimum order value ${MIN_ORDER_VALUE_USDT:.2f}"
+                approval['adjusted_size'] = 0
+                if self.database:
+                    self.database.store_system_event(
+                        "TRADE_REJECTED_MIN_VALUE",
+                        {'symbol': symbol, 'requested_size': size_usdt, 'adjusted_size': adjusted_size, 'min_value': MIN_ORDER_VALUE_USDT},
+                        "INFO",
+                        "Risk Management"
+                    )
+                return approval
+
+
+            approval['approved'] = True
+            approval['adjusted_size'] = adjusted_size
+
+            if self.database:
                 self.database.store_system_event(
                     "TRADE_APPROVED",
                     {
                         'symbol': symbol,
                         'original_size': size_usdt,
                         'approved_size': approval['adjusted_size'],
-                        'reason': approval['reason'] or "No restrictions"
+                        'reason': approval['reason'] or "Passed all checks"
                     },
                     "INFO",
                     "Risk Management"
                 )
-            
+
             return approval
-            
+
         except Exception as e:
-            print(f"Error in trade approval check: {e}")
+            self.logger.error(f"Critical error in can_trade check for {symbol}: {e}", exc_info=True)
             if self.error_handler:
-                self.error_handler.handle_trading_error(e, symbol, "trade_approval")
-            
+                self.error_handler.handle_trading_error(e, symbol, "trade_approval_critical")
+
             return {
                 'approved': False,
-                'reason': f'Error in risk check: {str(e)}',
+                'reason': f'Critical error in risk check: {str(e)}',
                 'adjusted_size': 0
             }
 
@@ -1210,21 +1219,6 @@ class AdvancedRiskManager:
                     "Risk Management"
                 )
             
-            if self.consecutive_losses >= self.max_consecutive_losses:
-                self.circuit_breaker = True
-                print(f"🚨 Circuit breaker activated after {self.consecutive_losses} consecutive losses!")
-                
-                if self.database:
-                    self.database.store_system_event(
-                        "CIRCUIT_BREAKER_ACTIVATED",
-                        {
-                            'consecutive_losses': self.consecutive_losses,
-                            'max_consecutive_losses': self.max_consecutive_losses
-                        },
-                        "CRITICAL",
-                        "Risk Management"
-                    )
-                    
         except Exception as e:
             print(f"Error recording trade outcome: {e}")
             if self.error_handler:

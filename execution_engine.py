@@ -121,36 +121,54 @@ class ExecutionEngine:
         self.emergency_protocols = emergency_protocols
 
     def _initialize_position_cache(self):
-        """Populates the initial position cache using REST API."""
-        self.logger.info("Initializing position cache via REST...")
-        try:
-            # Use the client's method directly
-            pos_response = self.client.get_position_info(category="linear", settleCoin="USDT")
-            if pos_response and pos_response.get('retCode') == 0:
-                with self._state_lock:
-                    self.position_cache.clear() # Clear existing before refresh
-                    count = 0
-                    for pos in pos_response['result'].get('list', []):
-                        symbol = pos.get('symbol')
-                        size = float(pos.get('size', 0))
-                        # Only cache if symbol exists and size > 0? Or cache all? Cache non-zero for relevance.
-                        if symbol and size > 0:
-                            self.position_cache[symbol] = {
-                                'size': size,
-                                'side': pos.get('side'),
-                                'avgPrice': float(pos.get('avgPrice', 0)),
-                                'positionValue': float(pos.get('positionValue', 0)),
-                                'unrealisedPnl': float(pos.get('unrealisedPnl', 0)),
-                                'liqPrice': float(pos.get('liqPrice', 0)),
-                                'updatedTime': int(pos.get('updatedTime', time.time()*1000)) # Store Bybit's timestamp
-                            }
-                            count += 1
-                    self.logger.info(f"Initialized position cache with {count} open positions.")
-            else:
-                err_msg = pos_response.get('retMsg', 'No response') if pos_response else 'No response'
-                self.logger.error(f"Failed to initialize position cache via REST: {err_msg}")
-        except Exception as e:
-            self.logger.error(f"Error initializing position cache: {e}", exc_info=True)
+            """Populates the initial position cache using REST API."""
+            self.logger.info("Initializing position cache via REST...")
+            try:
+                # Use the client's method directly
+                pos_response = self.client.get_position_info(category="linear", settleCoin="USDT")
+                if pos_response and pos_response.get('retCode') == 0:
+                    with self._state_lock:
+                        self.position_cache.clear() # Clear existing before refresh
+                        count = 0
+                        for pos in pos_response['result'].get('list', []):
+                            symbol = pos.get('symbol')
+                            size_str = pos.get('size', '0')
+                            avg_price_str = pos.get('avgPrice', '0')
+                            pos_value_str = pos.get('positionValue', '0')
+                            pnl_str = pos.get('unrealisedPnl', '0')
+                            liq_price_str = pos.get('liqPrice', '') # Get liqPrice, default to empty string
+                            updated_time_str = pos.get('updatedTime', str(int(time.time()*1000)))
+
+                            # Safely convert strings to float, handling empty strings or invalid values
+                            size = float(size_str) if size_str else 0.0
+                            avg_price = float(avg_price_str) if avg_price_str else 0.0
+                            pos_value = float(pos_value_str) if pos_value_str else 0.0
+                            pnl = float(pnl_str) if pnl_str else 0.0
+                            # --- FIX: Handle empty string for liqPrice ---
+                            liq_price = float(liq_price_str) if liq_price_str else 0.0
+                            # --- END FIX ---
+                            updated_time = int(updated_time_str) if updated_time_str else int(time.time()*1000)
+
+                            # Only cache if symbol exists and size > 0? Or cache all? Cache non-zero for relevance.
+                            if symbol and size > 0:
+                                self.position_cache[symbol] = {
+                                    'size': size,
+                                    'side': pos.get('side'),
+                                    'avgPrice': avg_price,
+                                    'positionValue': pos_value,
+                                    'unrealisedPnl': pnl,
+                                    'liqPrice': liq_price, # Use the safely converted float
+                                    'updatedTime': updated_time
+                                }
+                                count += 1
+                        self.logger.info(f"Initialized position cache with {count} open positions.")
+                else:
+                    err_msg = pos_response.get('retMsg', 'No response') if pos_response else 'No response'
+                    self.logger.error(f"Failed to initialize position cache via REST: {err_msg}")
+            except ValueError as ve: # Catch potential float conversion errors more specifically
+                self.logger.error(f"Error converting position data string to float during cache init: {ve}. Position data: {pos}", exc_info=True)
+            except Exception as e:
+                self.logger.error(f"Error initializing position cache: {e}", exc_info=True)
 
     def handle_private_ws_message(self, message: Dict):
             """Processes private WebSocket messages (orders, positions). MUST be called from WS thread."""
@@ -868,222 +886,228 @@ class ExecutionEngine:
             return {'success': False, 'message': f'Execution error: {e}'}
     
     def execute_enhanced_trade(self, decision: Dict):
-            """Executes a trade based on the enhanced decision dictionary via Market Order."""
-            try:
-                # Re-validate just before execution
-                if not self._validate_trade_decision(decision):
-                    return {'success': False, 'message': 'Trade validation failed before execution'}
+        """Executes a trade based on the enhanced decision dictionary via Market Order."""
+        # --- Define Minimum Order Value ---
+        MIN_ORDER_VALUE_USDT = 5.0 # Set Bybit's minimum USDT value for linear perpetuals
+        # --- End Definition ---
+        try:
+            if not self._validate_trade_decision(decision):
+                return {'success': False, 'message': 'Trade validation failed before execution'}
 
-                symbol = decision['symbol']
-                action = decision['action']
+            symbol = decision['symbol']
+            action = decision['action']
 
-                if action == 'HOLD':
-                    self.logger.info(f"HOLD decision for {symbol}, no execution needed.")
-                    return {'success': True, 'message': 'No action needed'}
+            if action == 'HOLD':
+                self.logger.info(f"HOLD decision for {symbol}, no execution needed.")
+                return {'success': True, 'message': 'No action needed'}
 
-                # Check emergency status
-                if self.emergency_protocols and self.emergency_protocols.emergency_mode:
-                    self.logger.warning(f"Skipping trade for {symbol}: Emergency mode active.")
-                    return {'success': False, 'message': 'Emergency mode active - trading suspended'}
+            if self.emergency_protocols and self.emergency_protocols.emergency_mode:
+                self.logger.warning(f"Skipping trade for {symbol}: Emergency mode active.")
+                return {'success': False, 'message': 'Emergency mode active - trading suspended'}
 
-                position_size_usdt = decision['position_size']
-                quantity_initial = decision['quantity'] # Calculated quantity before adjustments
-                current_price_at_decision = decision['current_price']
+            position_size_usdt = decision['position_size']
+            quantity_initial = decision['quantity']
+            current_price_at_decision = decision['current_price']
 
-                # --- Risk Check ---
-                risk_approval = self.risk_manager.can_trade(symbol, position_size_usdt, market_data=None)
-                if not risk_approval.get('approved'):
-                    reason = risk_approval.get('reason', 'No reason specified')
-                    self.logger.warning(f"Trade rejected by Risk Manager for {symbol}: {reason}")
-                    return {'success': False, 'message': f'Risk management rejected trade: {reason}'}
+            risk_approval = self.risk_manager.can_trade(symbol, position_size_usdt, market_data=None)
+            if not risk_approval.get('approved'):
+                reason = risk_approval.get('reason', 'No reason specified')
+                self.logger.warning(f"Trade rejected by Risk Manager for {symbol}: {reason}")
+                return {'success': False, 'message': f'Risk management rejected trade: {reason}'}
 
-                # --- Adjust Size if Necessary ---
-                adjusted_size = risk_approval.get('adjusted_size', position_size_usdt)
-                if adjusted_size != position_size_usdt:
-                    if adjusted_size <= 0:
-                        self.logger.warning(f"Risk adjustment resulted in non-positive size (${adjusted_size:.2f}) for {symbol}. Skipping trade.")
-                        return {'success': False, 'message': f'Risk adjustment resulted in non-positive size (${adjusted_size:.2f})'}
+            adjusted_size = risk_approval.get('adjusted_size', position_size_usdt)
+            if adjusted_size != position_size_usdt:
+                if adjusted_size <= 0:
+                    self.logger.warning(f"Risk adjustment resulted in non-positive size (${adjusted_size:.2f}) for {symbol}. Skipping trade.")
+                    return {'success': False, 'message': f'Risk adjustment resulted in non-positive size (${adjusted_size:.2f})'}
 
-                    position_size_usdt = adjusted_size
-                    if current_price_at_decision > 0:
-                        # Recalculate quantity based on adjusted size
-                        quantity_initial = position_size_usdt / current_price_at_decision
-                        self.logger.info(f"Adjusted trade size for {symbol} to ${position_size_usdt:.2f} ({quantity_initial:.8f} units initially) due to risk rules: {risk_approval.get('reason', '')}")
-                    else:
-                        self.logger.error(f"Cannot calculate adjusted quantity for {symbol}: decision price is zero.")
-                        return {'success': False, 'message': 'Cannot calculate quantity with zero price after risk adjustment.'}
-
-                # --- Get Instrument Rules ---
-                instrument_info = self.get_instrument_info(symbol)
-                if not instrument_info:
-                    self.logger.error(f"Could not get instrument rules for {symbol}. Skipping trade.")
-                    return {'success': False, 'message': f'Failed to get instrument rules for {symbol}'}
-
-                min_qty = instrument_info['minOrderQty']
-                qty_step = instrument_info['qtyStep']
-                adjusted_quantity_decimal = Decimal(str(quantity_initial)) # Use Decimal for precision
-
-                # --- Apply Instrument Rules ---
-                if adjusted_quantity_decimal < min_qty:
-                    self.logger.warning(f"Skipping trade for {symbol}: Initial quantity {adjusted_quantity_decimal} is below minimum {min_qty}.")
-                    return {'success': False, 'message': f'Initial quantity {adjusted_quantity_decimal} below minimum {min_qty}'}
-
-                # Round DOWN to the nearest qtyStep
-                # quantize(Decimal('0'), ROUND_DOWN) removes digits beyond the step's precision
-                adjusted_quantity_decimal = (adjusted_quantity_decimal / qty_step).quantize(Decimal('0'), ROUND_DOWN) * qty_step
-
-                # Final check after rounding
-                if adjusted_quantity_decimal < min_qty:
-                    self.logger.warning(f"Skipping trade for {symbol}: Adjusted quantity {adjusted_quantity_decimal} is below minimum {min_qty} after step rounding.")
-                    return {'success': False, 'message': f'Adjusted quantity {adjusted_quantity_decimal} below minimum {min_qty}'}
-
-                # Convert final quantity back to float or string as needed by API client
-                final_quantity_str = str(adjusted_quantity_decimal)
-                final_quantity_float = float(adjusted_quantity_decimal)
-                # Recalculate approximate USDT size based on final quantity
-                final_size_usdt = final_quantity_float * current_price_at_decision
-
-                # --- Log Intent with Final Quantity ---
-                self.logger.info(f"🎯 Attempting Enhanced {action} for {symbol}")
-                self.logger.info(f"   📊 Final Quantity: {final_quantity_str} units (~${final_size_usdt:.2f})") # Log final quantity
-                self.logger.info(f"   🛡️ Stop Loss: ${decision['stop_loss']:.2f}")
-                self.logger.info(f"   🎯 Take Profit: ${decision['take_profit']:.2f}")
-                self.logger.info(f"   ⚖️ Risk/Reward: {decision.get('risk_reward_ratio', 0):.2f}:1")
-                self.logger.info(f"   📈 Confidence: {decision.get('confidence', 0):.1f}%")
-                self.logger.info(f"   🌡️ Market Regime: {decision.get('market_regime', 'N/A')}")
-
-                side = 'Buy' if action == 'BUY' else 'Sell'
-                stop_loss = decision['stop_loss']
-                take_profit = decision['take_profit']
-
-                market_impact = self.market_impact_model.estimate_impact(symbol, final_quantity_float, side) # Use final float qty
-
-                # --- Place Order ---
-                order_response = self.client.place_order(
-                    symbol=symbol,
-                    side=side,
-                    order_type='Market',
-                    qty=final_quantity_str, # Pass the adjusted quantity string
-                    price=None,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit
-                )
-
-                # --- Process Response ---
-                if order_response and order_response.get('retCode') == 0:
-                    order_id = order_response['result']['orderId']
-                    executed_price_str = order_response['result'].get('avgPrice', '0')
-                    executed_price = float(executed_price_str) if executed_price_str and executed_price_str != '0' else current_price_at_decision
-
-                    # Update Internal State
-                    with self._state_lock:
-                        self.open_orders[order_id] = {
-                            'symbol': symbol, 'order_id': order_id, 'side': side,
-                            'quantity': final_quantity_float, # Store final float qty
-                            'timestamp': time.time(), 'status': 'New',
-                            'type': 'Market', 'avgPrice': executed_price
-                        }
-
-                    self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
-
-                    # Prepare Trade Record
-                    trade_record = {**decision} # Start with the full decision dict
-                    trade_record.update({
-                        'timestamp': time.time(), # Overwrite with execution time
-                        'side': side,
-                        'quantity': final_quantity_float, # Store final executed quantity
-                        'position_size_usdt': final_size_usdt, # Store final approx size
-                        'entry_price': executed_price,
-                        'order_id': order_id,
-                        'success': True,
-                        # 'ml_prediction_details' is already in decision, so it's included here
-                    })
-                    # Remove potentially large/unserializable objects if they exist
-                    trade_record.pop('signals', None)
-                    trade_record.pop('market_context', None)
-                    trade_record.pop('trade_quality', None)
-                    trade_record.pop('technical_indicators', None) # Remove if present
-
-                    self.trade_history.append(trade_record) # Append to local history
-
-                    # --- FIX: Pass the modified trade_record to the database ---
-                    if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
-                        self.risk_manager.database.store_trade(trade_record)
-                    # --- END FIX ---
-
-                    self.logger.info(f"✅ Enhanced trade for {symbol} placed successfully! Order ID: {order_id}")
-
-                    # Return Success Result
-                    return {
-                        'success': True, 'order_id': order_id, 'symbol': symbol, 'side': side,
-                        'quantity': final_quantity_float, # Return final executed quantity
-                        'executed_price': executed_price,
-                        'position_size': final_size_usdt, # Return final executed size
-                        'stop_loss': stop_loss, 'take_profit': take_profit,
-                        'risk_reward': decision.get('risk_reward_ratio', 0),
-                        'confidence': decision.get('confidence', 0)
-                    }
+                position_size_usdt = adjusted_size
+                if current_price_at_decision > 0:
+                    quantity_initial = position_size_usdt / current_price_at_decision
+                    self.logger.info(f"Adjusted trade size for {symbol} to ${position_size_usdt:.2f} ({quantity_initial:.8f} units initially) due to risk rules: {risk_approval.get('reason', '')}")
                 else:
-                    # Handle Order Placement Failure
-                    error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
-                    ret_code = order_response.get('retCode', -1) if order_response else -1
-                    self.logger.error(f"❌ Enhanced trade order failed for {symbol}: {error_msg} (Code: {ret_code})")
+                    self.logger.error(f"Cannot calculate adjusted quantity for {symbol}: decision price is zero.")
+                    return {'success': False, 'message': 'Cannot calculate quantity with zero price after risk adjustment.'}
 
-                    # Log failed attempt
+            instrument_info = self.get_instrument_info(symbol)
+            if not instrument_info:
+                self.logger.error(f"Could not get instrument rules for {symbol}. Skipping trade.")
+                return {'success': False, 'message': f'Failed to get instrument rules for {symbol}'}
+
+            min_qty = instrument_info['minOrderQty']
+            qty_step = instrument_info['qtyStep']
+            adjusted_quantity_decimal = Decimal(str(quantity_initial))
+
+            if adjusted_quantity_decimal < min_qty:
+                self.logger.warning(f"Skipping trade for {symbol}: Initial quantity {adjusted_quantity_decimal} is below minimum {min_qty}.")
+                return {'success': False, 'message': f'Initial quantity {adjusted_quantity_decimal} below minimum {min_qty}'}
+
+            adjusted_quantity_decimal = (adjusted_quantity_decimal / qty_step).quantize(Decimal('0'), ROUND_DOWN) * qty_step
+
+            if adjusted_quantity_decimal < min_qty:
+                self.logger.warning(f"Skipping trade for {symbol}: Adjusted quantity {adjusted_quantity_decimal} is below minimum {min_qty} after step rounding.")
+                return {'success': False, 'message': f'Adjusted quantity {adjusted_quantity_decimal} below minimum {min_qty}'}
+
+            final_quantity_str = str(adjusted_quantity_decimal)
+            final_quantity_float = float(adjusted_quantity_decimal)
+            final_size_usdt = final_quantity_float * current_price_at_decision
+
+            # --- ADD MINIMUM ORDER VALUE CHECK ---
+            if final_size_usdt < MIN_ORDER_VALUE_USDT:
+                self.logger.warning(f"Skipping trade for {symbol}: Final order value ${final_size_usdt:.4f} is below minimum ${MIN_ORDER_VALUE_USDT:.2f} USDT.")
+                # Log this as a failed trade attempt for tracking
+                trade_record = {**decision}
+                trade_record.update({
+                    'timestamp': time.time(), 'side': 'Buy' if action == 'BUY' else 'Sell',
+                    'quantity': final_quantity_float,
+                    'position_size_usdt': final_size_usdt,
+                    'entry_price': None, 'order_id': None, 'success': False,
+                    'error_message': f'Order value ${final_size_usdt:.4f} below minimum ${MIN_ORDER_VALUE_USDT:.2f}'
+                })
+                trade_record.pop('signals', None); trade_record.pop('market_context', None)
+                trade_record.pop('trade_quality', None); trade_record.pop('technical_indicators', None)
+                self.trade_history.append(trade_record)
+                if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                    self.risk_manager.database.store_trade(trade_record)
+                # No need to call risk_manager.record_trade_outcome as no order was placed
+
+                return {'success': False, 'message': f'Order value ${final_size_usdt:.4f} below minimum ${MIN_ORDER_VALUE_USDT:.2f}'}
+            # --- END MINIMUM ORDER VALUE CHECK ---
+
+
+            self.logger.info(f"🎯 Attempting Enhanced {action} for {symbol}")
+            self.logger.info(f"   📊 Final Quantity: {final_quantity_str} units (~${final_size_usdt:.2f})")
+            self.logger.info(f"   🛡️ Stop Loss: ${decision['stop_loss']:.2f}")
+            self.logger.info(f"   🎯 Take Profit: ${decision['take_profit']:.2f}")
+            self.logger.info(f"   ⚖️ Risk/Reward: {decision.get('risk_reward_ratio', 0):.2f}:1")
+            self.logger.info(f"   📈 Confidence: {decision.get('confidence', 0):.1f}%")
+            self.logger.info(f"   🌡️ Market Regime: {decision.get('market_regime', 'N/A')}")
+
+            side = 'Buy' if action == 'BUY' else 'Sell'
+            stop_loss = decision['stop_loss']
+            take_profit = decision['take_profit']
+
+            market_impact = self.market_impact_model.estimate_impact(symbol, final_quantity_float, side)
+
+            order_response = self.client.place_order(
+                symbol=symbol,
+                side=side,
+                order_type='Market',
+                qty=final_quantity_str,
+                price=None,
+                stop_loss=stop_loss,
+                take_profit=take_profit
+            )
+
+            if order_response and order_response.get('retCode') == 0:
+                order_id = order_response['result']['orderId']
+                executed_price_str = order_response['result'].get('avgPrice', '0')
+                executed_price = float(executed_price_str) if executed_price_str and executed_price_str != '0' else current_price_at_decision
+
+                with self._state_lock:
+                    self.open_orders[order_id] = {
+                        'symbol': symbol, 'order_id': order_id, 'side': side,
+                        'quantity': final_quantity_float,
+                        'timestamp': time.time(), 'status': 'New',
+                        'type': 'Market', 'avgPrice': executed_price
+                    }
+
+                self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
+
+                trade_record = {**decision}
+                trade_record.update({
+                    'timestamp': time.time(),
+                    'side': side,
+                    'quantity': final_quantity_float,
+                    'position_size_usdt': final_size_usdt,
+                    'entry_price': executed_price,
+                    'order_id': order_id,
+                    'success': True,
+                })
+                trade_record.pop('signals', None)
+                trade_record.pop('market_context', None)
+                trade_record.pop('trade_quality', None)
+                trade_record.pop('technical_indicators', None)
+
+                self.trade_history.append(trade_record)
+
+                if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                    self.risk_manager.database.store_trade(trade_record)
+
+                self.logger.info(f"✅ Enhanced trade for {symbol} placed successfully! Order ID: {order_id}")
+
+                # --- FIX: Call record_trade_outcome on successful execution ---
+                # Assuming success means placed, not necessarily filled profitably yet
+                self.risk_manager.record_trade_outcome(successful=True, pnl=0)
+                # --- END FIX ---
+
+
+                return {
+                    'success': True, 'order_id': order_id, 'symbol': symbol, 'side': side,
+                    'quantity': final_quantity_float,
+                    'executed_price': executed_price,
+                    'position_size': final_size_usdt,
+                    'stop_loss': stop_loss, 'take_profit': take_profit,
+                    'risk_reward': decision.get('risk_reward_ratio', 0),
+                    'confidence': decision.get('confidence', 0)
+                }
+            else:
+                error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
+                ret_code = order_response.get('retCode', -1) if order_response else -1
+                self.logger.error(f"❌ Enhanced trade order failed for {symbol}: {error_msg} (Code: {ret_code})")
+
+                trade_record = {**decision}
+                trade_record.update({
+                    'timestamp': time.time(), 'side': side,
+                    'quantity': final_quantity_float,
+                    'position_size_usdt': final_size_usdt,
+                    'entry_price': None, 'order_id': None, 'success': False,
+                    'error_message': f"Code {ret_code}: {error_msg}"
+                })
+                trade_record.pop('signals', None)
+                trade_record.pop('market_context', None)
+                trade_record.pop('trade_quality', None)
+                trade_record.pop('technical_indicators', None)
+
+                self.trade_history.append(trade_record)
+                if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                    self.risk_manager.database.store_trade(trade_record)
+
+                # --- FIX: Call record_trade_outcome on failed execution ---
+                self.risk_manager.record_trade_outcome(successful=False, pnl=0)
+                # --- END FIX ---
+
+                return {'success': False, 'message': f'Order failed ({ret_code}): {error_msg}'}
+
+        except Exception as e:
+            symbol_for_log = decision.get('symbol', 'UNKNOWN') if isinstance(decision, dict) else 'UNKNOWN'
+            self.logger.error(f"❌ Exception during enhanced trade execution for {symbol_for_log}: {e}", exc_info=True)
+            if isinstance(decision, dict) and 'action' in decision and decision['action'] != 'HOLD':
+                try:
                     trade_record = {**decision}
+                    qty_to_log = float(adjusted_quantity_decimal) if 'adjusted_quantity_decimal' in locals() else quantity_initial
+                    size_to_log = float(final_size_usdt) if 'final_size_usdt' in locals() else position_size_usdt
                     trade_record.update({
-                        'timestamp': time.time(), 'side': side,
-                        'quantity': final_quantity_float, # Log attempted final quantity
-                        'position_size_usdt': final_size_usdt, # Log attempted final size
-                        'entry_price': None, 'order_id': None, 'success': False,
-                        'error_message': f"Code {ret_code}: {error_msg}"
-                        # 'ml_prediction_details' is already in decision
+                        'timestamp': time.time(),
+                        'quantity': qty_to_log,
+                        'position_size_usdt': size_to_log,
+                        'success': False,
+                        'error_message': f'Execution Exception: {e}'
                     })
-                    # Remove potentially large/unserializable objects if they exist
                     trade_record.pop('signals', None)
                     trade_record.pop('market_context', None)
                     trade_record.pop('trade_quality', None)
                     trade_record.pop('technical_indicators', None)
 
                     self.trade_history.append(trade_record)
-                    # --- FIX: Pass the modified trade_record to the database ---
                     if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
                         self.risk_manager.database.store_trade(trade_record)
+
+                    # --- FIX: Call record_trade_outcome on exception ---
+                    self.risk_manager.record_trade_outcome(successful=False, pnl=0)
                     # --- END FIX ---
-
-                    return {'success': False, 'message': f'Order failed ({ret_code}): {error_msg}'}
-
-            except Exception as e:
-                # Handle Unexpected Errors
-                symbol_for_log = decision.get('symbol', 'UNKNOWN') if isinstance(decision, dict) else 'UNKNOWN'
-                self.logger.error(f"❌ Exception during enhanced trade execution for {symbol_for_log}: {e}", exc_info=True)
-                if isinstance(decision, dict) and 'action' in decision and decision['action'] != 'HOLD':
-                    try:
-                        trade_record = {**decision}
-                        # Use initial or adjusted quantity/size if final calculation failed
-                        qty_to_log = float(adjusted_quantity_decimal) if 'adjusted_quantity_decimal' in locals() else quantity_initial
-                        size_to_log = float(final_size_usdt) if 'final_size_usdt' in locals() else position_size_usdt
-                        trade_record.update({
-                            'timestamp': time.time(),
-                            'quantity': qty_to_log,
-                            'position_size_usdt': size_to_log,
-                            'success': False,
-                            'error_message': f'Execution Exception: {e}'
-                            # 'ml_prediction_details' is already in decision
-                        })
-                        # Remove potentially large/unserializable objects if they exist
-                        trade_record.pop('signals', None)
-                        trade_record.pop('market_context', None)
-                        trade_record.pop('trade_quality', None)
-                        trade_record.pop('technical_indicators', None)
-
-                        self.trade_history.append(trade_record)
-                        # --- FIX: Pass the modified trade_record to the database ---
-                        if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
-                            self.risk_manager.database.store_trade(trade_record)
-                        # --- END FIX ---
-                    except: pass
-                return {'success': False, 'message': f'Execution engine error: {e}'}
+                except: pass
+            return {'success': False, 'message': f'Execution engine error: {e}'}
     
     def execute_trade_with_retry(self, decision: Dict, max_retries: int = None):
             """Attempts to execute a trade using adaptive strategy with retries on failure."""

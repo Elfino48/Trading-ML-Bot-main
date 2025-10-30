@@ -40,7 +40,7 @@ class BybitClient:
         self.ws_callback: Optional[Callable[[Dict], None]] = None
         self._ws_stop_event = threading.Event()
         self._ws_last_ping_time = {'public': 0, 'private': 0}
-        self._ws_ping_interval = 20  # Changed to 15 seconds for safer buffer (was 20)
+        self._ws_ping_interval = 15  # Changed to 15 seconds for safer buffer (was 20)
         
         # Enhanced reconnection settings
         self._ws_reconnect_attempts = {'public': 0, 'private': 0}
@@ -379,6 +379,15 @@ class BybitClient:
         if settle_coin: params["settleCoin"] = settle_coin
         return self._request("POST", "/v5/order/cancel-all", params)
 
+    def is_ws_really_connected(self, stream_type: str) -> bool:
+        """More robust check: flag is True AND WS object exists"""
+        if stream_type == "public":
+            # Check flag AND if the WebSocketApp object itself is still assigned
+            return self.ws_public_connected and self.ws_public is not None
+        elif stream_type == "private":
+            # Check flag AND if the WebSocketApp object itself is still assigned
+            return self.ws_private_connected and self.ws_private is not None
+        return False
 
     def get_position_info(self, symbol: Optional[str] = None, category: str = "linear", settleCoin: Optional[str] = None): # Added settleCoin
         """Retrieves position information."""
@@ -474,7 +483,7 @@ class BybitClient:
                 current_attempt = self._ws_reconnect_attempts.get(stream_type, 0)
                 if current_attempt > 0:
                     delay = min(self._base_reconnect_delay * (2 ** (current_attempt - 1)), 
-                               self._max_reconnect_delay)
+                                self._max_reconnect_delay)
                     logger.info(f"Waiting {delay}s before reconnection attempt {current_attempt} for {stream_type}")
                     time.sleep(delay)
                 
@@ -491,12 +500,14 @@ class BybitClient:
                 else:
                     self.ws_private = ws
 
-                # SECURITY FIX: Removed SSL verification disable - using default secure SSL
+                # --- FIX: Enable automatic ping ---
                 ws.run_forever(
-                    ping_interval=0, 
-                    ping_timeout=None,
+                    ping_interval=18, # Changed from 0 to 18 (must be < 20)
+                    ping_timeout=10,  # Add a 10-second timeout for the pong response
                     skip_utf8_validation=False
                 )
+                # --- END FIX ---
+                
                 # Reset reconnect attempts on clean exit
                 self._ws_reconnect_attempts[stream_type] = 0
 
@@ -556,22 +567,10 @@ class BybitClient:
         current_time = time.time()
         self._ws_last_message_time[stream_type] = current_time
         
-        # OPTIONAL: Check connection health - if no messages for too long, force reconnect
-        # Monitor if this causes excessive reconnections and adjust _ws_max_silence accordingly
-        if current_time - self._ws_last_message_time[stream_type] > self._ws_max_silence:
-            logger.warning(f"{stream_type} WebSocket silent for {self._ws_max_silence}s, forcing reconnect")
-            if stream_type == "public" and self.ws_public:
-                self.ws_public.close()
-                return
-            elif stream_type == "private" and self.ws_private:
-                self.ws_private.close()
-                return
-        
-        # --- Send ping if interval elapsed ---
-        # Using 15-second interval for safer buffer (Bybit requires within 20s)
-        if current_time - self._ws_last_ping_time.get(stream_type, 0) > self._ws_ping_interval:
-             logger.debug(f"Ping interval elapsed for {stream_type}, sending ping.")
-             self._ws_send_ping(stream_type)
+        # --- MANUAL PING LOGIC REMOVED ---
+        # The websocket-client library now handles pings automatically
+        # because ping_interval=18 (or similar) should be set in ws.run_forever()
+        # --- END REMOVAL ---
 
         # logger.debug(f"WS message received ({stream_type}): {message[:200]}") # DEBUG: Log start of message
 
@@ -581,11 +580,11 @@ class BybitClient:
 
             # --- Handle Ping/Pong/Ops ---
             if op == "pong":
-                # logger.debug(f"Received pong from {stream_type}")
-                 # Update last ping time? Or just rely on successful send? Let's assume send is enough.
-                return # Successful pong received, confirms connection is alive
+                # The library handles pongs automatically when ping_interval is set
+                 logger.debug(f"Received pong from {stream_type}")
+                 return # Successful pong received, confirms connection is alive
 
-            elif data.get("ping"): # Handle server-initiated ping (less common for Bybit V5?)
+            elif data.get("ping"): # Handle server-initiated ping
                  logger.info(f"Received server ping on {stream_type}, sending pong response.")
                  try:
                      ws_app.send(json.dumps({"op": "pong"}))

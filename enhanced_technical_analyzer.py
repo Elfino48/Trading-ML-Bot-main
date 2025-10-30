@@ -173,71 +173,95 @@ class EnhancedTechnicalAnalyzer:
             close = df['close'].astype(float)
             high = df['high'].astype(float)
             low = df['low'].astype(float)
-            volume = df['volume'].astype(float)
+            volume = df['volume'].astype(float) # Ensure volume is float series
 
             indicators = {}
 
             try:
+                # --- [Existing Indicator Calculations: EMA, SMA, HMA, ST, RSI, Stoch, WR, ATR, BB] ---
                 for period in [8, 21, 34, 55, 89]:
-                    indicators[f'ema_{period}'] = self._calculate_ema(close, period)
-
-                # --- FIX 1: Calculate and add SMA 50 ---
+                     indicators[f'ema_{period}'] = self._calculate_ema(close, period)
                 indicators['sma_50'] = self._calculate_sma(close, 50)
-                # --- END FIX 1 ---
-
                 hma_length = 20
                 indicators['hma'] = self._calculate_hma(close, hma_length)
-
                 indicators['super_trend'] = self._calculate_supertrend(high, low, close)
-
                 for period in [6, 14, 21]:
-                    indicators[f'rsi_{period}'] = self._calculate_rsi(close, period)
-
+                     indicators[f'rsi_{period}'] = self._calculate_rsi(close, period)
                 stoch_k, stoch_d = self._calculate_stochastic(high, low, close)
                 indicators['stoch_k'] = stoch_k
                 indicators['stoch_d'] = stoch_d
-
                 indicators['williams_r'] = self._calculate_williams_r(high, low, close)
-
                 indicators['atr'] = self._calculate_atr(high, low, close)
                 indicators['atr_percent'] = (indicators['atr'] / close.iloc[-1]) * 100 if close.iloc[-1] > 0 else 0
-
                 bb_upper, bb_middle, bb_lower = self._calculate_bollinger_bands(close)
                 indicators['bb_upper'] = bb_upper
                 indicators['bb_lower'] = bb_lower
                 indicators['bb_middle'] = bb_middle
                 indicators['bb_position'] = (close.iloc[-1] - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+                # --- [End Existing Indicator Calculations] ---
 
-                indicators['volume_sma_20'] = volume.rolling(20).mean().iloc[-1]
-                indicators['volume_ratio'] = volume.iloc[-1] / indicators['volume_sma_20'] if indicators['volume_sma_20'] > 0 else 1
 
+                # --- ROBUST VOLUME RATIO CALCULATION ---
+                indicators['volume'] = volume.iloc[-1]
+
+                volume_sma_20_excluding_current = 0.0
+                if len(volume) >= 21:
+                    volume_sma_20_excluding_current = volume.iloc[-21:-1].mean()
+                elif len(volume) > 1:
+                     volume_sma_20_excluding_current = volume.iloc[:-1].mean()
+
+                indicators['volume_sma_20'] = volume_sma_20_excluding_current
+
+                volume_for_ratio = 0.0
+                index_for_volume = None # <<< Add logging for index
+                if len(volume) > 1:
+                    volume_for_ratio = volume.iloc[-2]
+                    index_for_volume = volume.index[-2] # <<< Get the timestamp/index
+
+                # --- ADD DETAILED LOGGING ---
+                symbol_name = df.iloc[-1].name if hasattr(df.iloc[-1], 'name') else 'N/A' # Try to get symbol if possible
+                self.logger.info(f"[{symbol_name}] Volume Ratio DEBUG: "
+                                f"LastCompletedVol ({index_for_volume}): {volume_for_ratio:.4f}, " # Log value AND index
+                                f"Prev20SMA: {volume_sma_20_excluding_current:.4f}, "
+                                f"CurrentVol: {indicators['volume']:.4f}")
+                # --- END DETAILED LOGGING ---
+
+                indicators['volume_ratio'] = volume_for_ratio / volume_sma_20_excluding_current if volume_sma_20_excluding_current > 0 else 1.0
+
+                self.logger.debug(f"Volume Ratio Calc: LastCompletedVol={volume_for_ratio:.2f}, Prev20SMA={volume_sma_20_excluding_current:.2f}, Ratio={indicators['volume_ratio']:.3f}")
+                # --- END ROBUST VOLUME RATIO CALCULATION ---
+
+
+                # --- [Remaining Indicator Calculations: OBV, Regime, SR, Anomaly, Price vs High/Low, Momentum] ---
                 obv = self._calculate_obv(close, volume)
                 indicators['obv_trend'] = self._calculate_slope(obv, 5)
-
                 regime_result = self._detect_market_regime_enhanced(close, high, low, volume)
                 indicators['market_regime'] = regime_result['regime']
                 indicators['regime_confidence'] = regime_result['confidence']
                 indicators['regime_transition_prob'] = regime_result['transition_prob']
-
                 sr_levels = self._find_support_resistance(close, high, low)
                 indicators['support'] = sr_levels['support']
                 indicators['resistance'] = sr_levels['resistance']
-
                 indicators['is_anomaly'] = self._detect_anomalies(close)
-
                 indicators['price_vs_high_20'] = close.iloc[-1] / high.rolling(20).max().iloc[-1] if high.rolling(20).max().iloc[-1] > 0 else 1
                 indicators['price_vs_low_20'] = close.iloc[-1] / low.rolling(20).min().iloc[-1] if low.rolling(20).min().iloc[-1] > 0 else 1
-
-                # Add momentum alignment indicators
                 momentum_indicators = self.calculate_momentum_alignment(df)
                 indicators.update(momentum_indicators)
+                # --- [End Remaining Indicator Calculations] ---
+
 
                 self.regime_history.append(indicators['market_regime'])
                 if len(self.regime_history) > 50:
                     self.regime_history.pop(0)
 
             except Exception as e:
-                print(f"Error calculating enhanced indicators: {e}")
+                log_func = getattr(self, 'logger', None)
+                msg = f"Error calculating enhanced indicators: {e}"
+                if log_func and hasattr(log_func, 'error'):
+                    symbol = getattr(df, 'symbol_name', 'UNKNOWN')
+                    log_func.error(f"[{symbol}] {msg}", exc_info=True)
+                else:
+                    print(f"❌ {msg}")
                 return {}
 
             return indicators

@@ -2072,3 +2072,72 @@ class MLPredictor:
             self.logger.error(f"Critical error during ML outcome update process: {e}", exc_info=True)
             if self.error_handler:
                 self.error_handler.handle_ml_error(e, "ALL", "outcome_update_process")
+
+    # Add this method to the MLPredictor class
+    def analyze_model_performance_issues(self) -> Dict:
+        """Analyze why models are producing too many 'Hold' predictions"""
+        analysis = {}
+        self.logger.info("Analyzing ML model performance issues (Hold prediction ratio)...") # Added logging
+
+        for symbol, model_info in self.model_versions.items():
+            if symbol not in self.models:
+                continue
+
+            # Check model performance metrics
+            accuracy = model_info.get('accuracy', 0)
+            training_samples = model_info.get('training_samples', 0)
+            feature_count = model_info.get('feature_count', 0)
+
+            # Analyze prediction distribution from recent predictions
+            hold_ratio = self._calculate_hold_prediction_ratio(symbol)
+
+            analysis[symbol] = {
+                'accuracy': accuracy,
+                'training_samples': training_samples,
+                'feature_count': feature_count,
+                'hold_prediction_ratio': hold_ratio,
+                'issues': [],
+                'recommendations': []
+            }
+
+            # Identify issues
+            if hold_ratio > 0.7: # If more than 70% of recent predictions are HOLD
+                analysis[symbol]['issues'].append("High proportion of 'Hold' predictions (>70%)")
+                # Removed the retraining recommendation from here, as it's just analysis
+            elif hold_ratio < 0.1: # Added check for unusually LOW hold ratio
+                 analysis[symbol]['issues'].append("Very low proportion of 'Hold' predictions (<10%)")
+                 analysis[symbol]['recommendations'].append("Check target definition or model calibration")
+
+
+            if accuracy < 0.55:
+                analysis[symbol]['issues'].append(f"Low accuracy ({accuracy:.3f})")
+                analysis[symbol]['recommendations'].append("Consider retraining or feature review")
+
+            if training_samples < self.min_training_samples: # Use class attribute
+                analysis[symbol]['issues'].append(f"Insufficient training samples ({training_samples})")
+                analysis[symbol]['recommendations'].append("Collect more historical data before training")
+
+        self.logger.info(f"ML performance issue analysis complete for {len(analysis)} symbols.")
+        return analysis
+
+    # Add this helper method to the MLPredictor class
+    def _calculate_hold_prediction_ratio(self, symbol: str) -> float:
+        """Calculate ratio of hold predictions from recent predictions"""
+        if symbol not in self.prediction_quality_metrics:
+            self.logger.warning(f"_calculate_hold_prediction_ratio: No quality metrics found for {symbol}")
+            return 0.5 # Return neutral if no data
+
+        metrics = self.prediction_quality_metrics[symbol]
+        predictions = metrics.get('predictions', []) # Get the list of raw predictions (-2 to 2)
+
+        if not predictions:
+            self.logger.debug(f"_calculate_hold_prediction_ratio: No recent predictions tracked for {symbol}")
+            return 0.5 # Return neutral if no predictions tracked
+
+        # Count HOLD predictions (raw prediction == 0)
+        hold_count = sum(1 for pred in predictions if pred == 0)
+        total_predictions = len(predictions)
+        hold_ratio = hold_count / total_predictions if total_predictions > 0 else 0.0
+
+        self.logger.debug(f"_calculate_hold_prediction_ratio for {symbol}: {hold_count}/{total_predictions} holds ({hold_ratio:.2f})")
+        return hold_ratio

@@ -19,9 +19,12 @@ class DataEngine:
 
         # Set the callback in the BybitClient
         self.client.set_ws_callback(self._handle_ws_message)
-        # Start WebSocket streams
-        self.start_streams()
-        # Fetch initial historical data base
+        
+        # --- DO NOT START STREAMS HERE ---
+        # self.start_streams() # <<< COMMENT OUT OR DELETE THIS LINE
+        # --- END ---
+        
+        # Fetch initial historical data base (This uses REST, it's fine)
         self.initialize_historical_data()
 
     def set_error_handler(self, error_handler):

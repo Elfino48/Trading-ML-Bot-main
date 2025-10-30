@@ -22,16 +22,21 @@ TELEGRAM_CONFIG = {
     "LOG_LEVEL": os.getenv("TELEGRAM_LOG_LEVEL", "ALL")
 }
 
-DEBUG_MODE = os.getenv("DEBUG_MODE", "True").lower() == "true"
+DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
 
 # Trading Parameters
-SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,TONUSDT").split(",")
+SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
 TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "15")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 
+# --- NEW: RISK MULTIPLIER ---
+# Set this to 1.0 for normal trading.
+# Set to 10.0 to use 10x your equity for position sizing and exposure calculations.
+# WARNING: This significantly increases risk and leverage.
+RISK_MULTIPLIER = float(os.getenv("RISK_MULTIPLIER", "10.0"))
+
 # Risk Configuration
 class RiskConfig:
-    # Centralized configuration for all aggressiveness levels
     LEVELS = {
         "conservative": {
             "min_confidence": 30,
@@ -51,10 +56,11 @@ class RiskConfig:
                 'mean_reversion': 0.30,
                 'breakout': 0.20,
                 'ml_prediction': 0.10
-            }
+            },
+            "risk_multiplier": RISK_MULTIPLIER,
         },
         "moderate": {
-            "min_confidence": 25,  # Fixed inconsistency
+            "min_confidence": 25,
             "max_position_size_usdt": 300,
             "max_daily_loss_percent": 8,
             "global_stop_loss_percent": 3,
@@ -71,7 +77,8 @@ class RiskConfig:
                 'mean_reversion': 0.35,
                 'breakout': 0.20,
                 'ml_prediction': 0.20
-            }
+            },
+            "risk_multiplier": RISK_MULTIPLIER,
         },
         "aggressive": {
             "min_confidence": 20,
@@ -91,7 +98,8 @@ class RiskConfig:
                 'mean_reversion': 0.40,
                 'breakout': 0.25,
                 'ml_prediction': 0.15
-            }
+            },
+            "risk_multiplier": RISK_MULTIPLIER,
         },
         "high": {
             "min_confidence": 15,
@@ -111,7 +119,8 @@ class RiskConfig:
                 'mean_reversion': 0.45,
                 'breakout': 0.30,
                 'ml_prediction': 0.10
-            }
+            },
+            "risk_multiplier": RISK_MULTIPLIER,
         }
     }
 
