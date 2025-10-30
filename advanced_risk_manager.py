@@ -664,39 +664,42 @@ class AdvancedRiskManager:
             if portfolio_value <= 0:
                 return {'approved': True, 'reason': 'No portfolio value data'}
             
-            max_exposure_pct = 40
+            scaled_max_exposure_pct = 40 * self.risk_multiplier
             planned_exposure_pct = (total_planned_exposure / portfolio_value) * 100
             
-            if planned_exposure_pct > max_exposure_pct:
-                allowed_exposure = max(0, (portfolio_value * max_exposure_pct / 100) - current_exposure)
+            if planned_exposure_pct > scaled_max_exposure_pct:
+                allowed_exposure = max(0, (portfolio_value * scaled_max_exposure_pct / 100) - current_exposure)
                 return {
                     'approved': False,
-                    'reason': f'Portfolio exposure limit exceeded: {planned_exposure_pct:.1f}% > {max_exposure_pct}%',
+                    'reason': f'Portfolio exposure limit exceeded: {planned_exposure_pct:.1f}% > {scaled_max_exposure_pct:.1f}% (scaled x{self.risk_multiplier})',
                     'suggested_size': allowed_exposure
                 }
-            
+
+            scaled_max_portfolio_correlation = self.max_portfolio_correlation * self.risk_multiplier
+
             if correlation_data and 'correlation_matrix' in correlation_data:
                 avg_correlation = self._calculate_average_correlation(new_symbol, correlation_data)
                 
-                if avg_correlation > self.max_portfolio_correlation:
-                    reduction_factor = self.max_portfolio_correlation / avg_correlation
+                if avg_correlation > scaled_max_portfolio_correlation:
+                    reduction_factor = scaled_max_portfolio_correlation / avg_correlation
                     suggested_size = new_position_size * reduction_factor
                     
                     return {
                         'approved': False,
-                        'reason': f'High portfolio correlation: {avg_correlation:.2f} > {self.max_portfolio_correlation}',
+                        'reason': f'High portfolio correlation: {avg_correlation:.2f} > {scaled_max_portfolio_correlation:.2f} (scaled x{self.risk_multiplier})',
                         'suggested_size': suggested_size
                     }
             
             symbol_concentration = self._calculate_symbol_concentration(new_symbol, new_position_size)
-            max_symbol_concentration = 0.15
             
-            if symbol_concentration > max_symbol_concentration * 100:
-                suggested_size = (portfolio_value * max_symbol_concentration) - current_exposure
+            scaled_max_symbol_concentration = 0.15 * self.risk_multiplier
+            
+            if symbol_concentration > scaled_max_symbol_concentration * 100:
+                suggested_size = (portfolio_value * scaled_max_symbol_concentration) - current_exposure
                 suggested_size = max(0, suggested_size)
                 return {
                     'approved': False,
-                    'reason': f'Symbol concentration limit: {symbol_concentration:.1f}% > {max_symbol_concentration*100}%',
+                    'reason': f'Symbol concentration limit: {symbol_concentration:.1f}% > {scaled_max_symbol_concentration*100:.1f}% (scaled x{self.risk_multiplier})',
                     'suggested_size': suggested_size
                 }
             
@@ -1020,36 +1023,55 @@ class AdvancedRiskManager:
             adjusted_size = size_usdt
             
             scaled_max_position_size = self.max_position_size_usdt * self.risk_multiplier
-
-            if adjusted_size > scaled_max_position_size:
-                adjusted_size = scaled_max_position_size
-                approval['reason'] = f"Position size capped by max_position_size_usdt (x{self.risk_multiplier}): ${scaled_max_position_size:.2f}"
-            else:
-                approval['reason'] = "Initial size within limits"
-
+            
             try:
                 wallet_balance = self.client.get_wallet_balance()
                 if wallet_balance and wallet_balance.get('retCode') == 0:
                     total_equity = float(wallet_balance['result']['list'][0]['totalEquity'])
 
+                    # 1. Check Max Risk Per Trade (based on equity)
                     max_risk_percent = self.config["base_size_percent"] * 2
-                    
                     max_risk_per_trade = (total_equity * max_risk_percent) * self.risk_multiplier
-
+                    
                     if adjusted_size > max_risk_per_trade:
                         adjusted_size = max_risk_per_trade
-                        approval['reason'] = f"Position size limited by max risk per trade (x{self.risk_multiplier}): ${max_risk_per_trade:.2f}"
+                        approval['reason'] = f"Size capped by max risk per trade (x{self.risk_multiplier}): ${max_risk_per_trade:.2f}"
 
+                    # 2. Check Max Position Size (hard limit)
+                    if adjusted_size > scaled_max_position_size:
+                        adjusted_size = scaled_max_position_size
+                        approval['reason'] = f"Size capped by max_position_size (x{self.risk_multiplier}): ${scaled_max_position_size:.2f}"
+                    
+                    # 3. Check Total Portfolio Exposure (based on current open positions)
                     current_exposure = self.get_current_exposure()
-                    max_exposure_percent = 0.3
-                    if current_exposure + adjusted_size > total_equity * max_exposure_percent:
-                        available_exposure = max(0, total_equity * max_exposure_percent - current_exposure)
+                    scaled_max_exposure_percent = 0.3 * self.risk_multiplier
+                    max_total_exposure = total_equity * scaled_max_exposure_percent
+                    
+                    if current_exposure + adjusted_size > max_total_exposure:
+                        available_exposure = max(0, max_total_exposure - current_exposure)
                         adjusted_size = available_exposure
-                        approval['reason'] = f"Position size limited by portfolio exposure: ${available_exposure:.2f} available"
+                        approval['reason'] = f"Size capped by portfolio exposure limit (x{self.risk_multiplier}): ${available_exposure:.2f} available"
+                    
+                    # If reason hasn't been set by a cap, set it to default
+                    if not approval['reason']:
+                        approval['reason'] = "Initial size within limits"
+
+                else:
+                    # Fallback if wallet balance fails
+                    if adjusted_size > scaled_max_position_size:
+                        adjusted_size = scaled_max_position_size
+                        approval['reason'] = f"Size capped by max_position_size (x{self.risk_multiplier}): ${scaled_max_position_size:.2f} (Wallet fetch failed)"
+                    else:
+                        approval['reason'] = "Initial size within limits (Wallet fetch failed)"
 
             except Exception as e:
                 self.logger.warning(f"Error checking wallet balance/exposure in can_trade: {e}")
-                pass
+                # Fallback on exception
+                if adjusted_size > scaled_max_position_size:
+                    adjusted_size = scaled_max_position_size
+                    approval['reason'] = f"Size capped by max_position_size (x{self.risk_multiplier}): ${scaled_max_position_size:.2f} (Exception)"
+                else:
+                    approval['reason'] = "Initial size within limits (Exception)"
 
 
             correlation_data = self.correlation_matrix

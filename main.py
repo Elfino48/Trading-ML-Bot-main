@@ -1,4 +1,5 @@
 import time
+from typing import List
 import pandas as pd
 import threading
 from bybit_client import BybitClient
@@ -252,39 +253,69 @@ class AdvancedTradingBot:
         print("✅ Configuration validation passed")
 
     def _initialize_ml_models(self):
+        """Loads existing models and trains any missing models at startup."""
         print("\n🤖 Initializing ML models...")
         try:
-            models_loaded = self.strategy_orchestrator.ml_predictor.load_models()
-            if not models_loaded:
-                print("📚 No saved models found. Training initial models...")
-                trained_count = self._retrain_all_models(force_all=True)
+            # 1. Load all existing models from disk
+            self.strategy_orchestrator.ml_predictor.load_models()
+            models_loaded_count = len(self.strategy_orchestrator.ml_predictor.models)
+            if models_loaded_count > 0:
+                print(f"✅ Loaded {models_loaded_count} pre-trained models from disk")
+            else:
+                print("ℹ️ No pre-trained models found on disk.")
+            
+            # 2. Check for missing models
+            loaded_symbols = set(self.strategy_orchestrator.ml_predictor.models.keys())
+            required_symbols = set(SYMBOLS)
+            missing_symbols = list(required_symbols - loaded_symbols)
+            
+            if not missing_symbols and models_loaded_count > 0:
+                print(f"✅ All {len(required_symbols)} required models are loaded.")
+                if self.telegram_bot:
+                    self.telegram_bot.log_important_event(
+                        "MODELS LOADED",
+                        f"Successfully loaded all {len(required_symbols)} pre-trained ML models"
+                    )
+            elif not missing_symbols and models_loaded_count == 0:
+                # No models loaded and none are missing? (SYMBOLS list is empty)
+                print("⚠️ No symbols configured, no models to load or train.")
+            else:
+                # 3. Train missing models
+                print(f"📚 Found {len(missing_symbols)} missing models. Training new models for: {missing_symbols}")
+                if self.telegram_bot:
+                    self.telegram_bot.log_important_event(
+                        "INITIAL MODELS TRAINING",
+                        f"Starting training for {len(missing_symbols)} new symbols: {', '.join(missing_symbols)}"
+                    )
+                
+                trained_count = self._retrain_all_models(symbols_to_train=missing_symbols)
+                
                 if trained_count > 0:
                     self.strategy_orchestrator.ml_predictor.save_models()
                     print(f"💾 Saved {trained_count} new models to disk")
                     if self.telegram_bot:
                         self.telegram_bot.log_important_event(
-                            "INITIAL MODELS TRAINED",
-                            f"Successfully trained and saved {trained_count} initial ML models"
+                            "NEW MODELS TRAINED",
+                            f"Successfully trained and saved {trained_count} new ML models"
                         )
                 else:
-                    error_msg = "Initial model training failed"
+                    error_msg = f"Initial model training failed for {missing_symbols}"
                     self.error_handler.handle_ml_error(Exception(error_msg), "ALL", "initial_training")
-            else:
-                print("✅ Using pre-trained models from disk")
-                if self.telegram_bot:
-                    self.telegram_bot.log_important_event(
-                        "MODELS LOADED",
-                        f"Successfully loaded {len(self.strategy_orchestrator.ml_predictor.models)} pre-trained ML models"
-                    )
+
         except Exception as e:
             self.error_handler.handle_ml_error(e, "ALL", "initialization")
             print("⚠️ Continuing without ML models or using potentially incomplete set")
 
-    def _retrain_all_models(self, force_all: bool = False) -> int:
+    def _retrain_all_models(self, force_all: bool = False, symbols_to_train: List[str] = None) -> int:
+        """Enhanced model retraining with performance-based selection"""
         trained_count = 0
         self.logger.info("[MODEL RETRAINING] Starting enhanced retraining process...")
         
-        if force_all:
+        # Get symbols that actually need retraining
+        if symbols_to_train:
+            symbols_to_retrain = symbols_to_train
+            self.logger.info(f"[MODEL RETRAINING] Training specific list of {len(symbols_to_retrain)} symbols: {symbols_to_retrain}")
+        elif force_all:
             symbols_to_retrain = SYMBOLS
             self.logger.info(f"[MODEL RETRAINING] Forcing retraining for all {len(symbols_to_retrain)} symbols")
         else:
@@ -635,15 +666,54 @@ class AdvancedTradingBot:
                     self.error_handler.handle_trading_error(e, symbol, "analysis")
                     if self.telegram_bot:
                         self.telegram_bot.log_error(error_msg, f"Analysis - {symbol}")
+            
             analysis_duration = time.time() - analysis_start
             print(f"   Analysis complete in {analysis_duration:.2f}s")
             
+            min_confidence = self.risk_manager.min_confidence
+
+            # --- Step 3.5: Pre-Execution Risk Check (NEW) ---
+            print("🛡️ Performing pre-execution risk check...")
+            try:
+                # Get current equity and exposure
+                total_equity = account_info.get('portfolio_value', self.get_portfolio_value())
+                current_exposure = self.risk_manager.get_current_exposure()
+                
+                # Get scaled portfolio limits
+                scaled_max_exposure_percent = 0.3 * self.risk_manager.risk_multiplier
+                max_total_exposure = total_equity * scaled_max_exposure_percent
+                available_exposure = max(0, max_total_exposure - current_exposure)
+                
+                # Get intended trades
+                intended_trades = [d for d in raw_decisions if d['action'] != 'HOLD' and d['confidence'] >= min_confidence]
+                total_intended_size = sum(d['position_size'] for d in intended_trades)
+                
+                print(f"   Available Exposure: ${available_exposure:.2f} (Max: ${max_total_exposure:.2f})")
+                print(f"   Total Intended Size: ${total_intended_size:.2f} across {len(intended_trades)} trades")
+
+                # If total intended size exceeds available exposure, scale all trades down
+                if total_intended_size > available_exposure and total_intended_size > 0:
+                    scaling_factor = available_exposure / total_intended_size
+                    print(f"   ⚠️ Intended size exceeds available exposure. Scaling all trades by {scaling_factor:.2f}")
+                    
+                    for decision in intended_trades:
+                        original_size = decision['position_size']
+                        decision['position_size'] = original_size * scaling_factor
+                        decision['quantity'] = decision['quantity'] * scaling_factor
+                        print(f"      {decision['symbol']} size reduced: ${original_size:.2f} -> ${decision['position_size']:.2f}")
+                else:
+                    print("   ✅ Total intended size is within portfolio exposure limits.")
+
+            except Exception as pre_risk_e:
+                self.logger.error(f"Error during pre-execution risk check: {pre_risk_e}", exc_info=True)
+                print(f"   ⚠️ Error during pre-execution risk check. Proceeding without scaling...")
+
+            # --- Step 4: Execute Trades ---
             print("🚀 Executing trades...")
             execution_start = time.time()
             actions_taken = 0
             strong_trades = 0
             moderate_trades = 0
-            min_confidence = self.risk_manager.min_confidence
 
             for decision in raw_decisions: 
                 symbol = decision['symbol']

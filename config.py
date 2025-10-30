@@ -33,7 +33,7 @@ LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 # Set this to 1.0 for normal trading.
 # Set to 10.0 to use 10x your equity for position sizing and exposure calculations.
 # WARNING: This significantly increases risk and leverage.
-RISK_MULTIPLIER = float(os.getenv("RISK_MULTIPLIER", "10.0"))
+RISK_MULTIPLIER = float(os.getenv("RISK_MULTIPLIER", "60.0"))
 
 # Risk Configuration
 class RiskConfig:

@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 import pandas as pd
 import numpy as np
@@ -20,12 +21,309 @@ except ImportError:
         TA_AVAILABLE = False
         print("Warning: No TA library available. Install ta or talib.")
 
+# enhanced_technical_analyzer.py - AFTER
+
 class EnhancedTechnicalAnalyzer:
     def __init__(self):
         self.regime_threshold = 0.5
         self.regime_history = []
         self.macro_indicators = {}
         self.logger = logging.getLogger(__name__)
+        
+        # NEW: Crypto-specific indicators and patterns
+        self.crypto_patterns = {
+            'bitcoin_halving_cycle': None,
+            'altcoin_season': False,
+            'market_cap_cycles': {},
+            'stablecoin_flows': {}
+        }
+        self.on_chain_cache = {}
+        self.exchange_metrics_cache = {}
+        
+    # NEW: Crypto-specific indicator methods
+    def calculate_crypto_specific_indicators(self, symbol: str, price_data: pd.DataFrame, 
+                                           on_chain_data: Dict = None, market_data: Dict = None) -> Dict:
+        """
+        Calculate crypto-specific indicators including network value and exchange flows
+        """
+        crypto_indicators = {}
+        
+        try:
+            # 1. Network Value to Transaction (NVT) Ratio
+            if on_chain_data and 'network_value' in on_chain_data and 'transaction_volume' in on_chain_data:
+                nvt_ratio = on_chain_data['network_value'] / max(on_chain_data['transaction_volume'], 1)
+                crypto_indicators['nvt_ratio'] = nvt_ratio
+                crypto_indicators['nvt_signal'] = 'overvalued' if nvt_ratio > 150 else 'undervalued' if nvt_ratio < 50 else 'fair'
+            
+            # 2. Realized Price vs Current Price
+            if on_chain_data and 'realized_price' in on_chain_data:
+                current_price = price_data['close'].iloc[-1]
+                realized_price = on_chain_data['realized_price']
+                crypto_indicators['realized_price_ratio'] = current_price / realized_price
+                crypto_indicators['market_health'] = 'healthy' if current_price > realized_price else 'weak'
+            
+            # 3. Exchange Net Flow
+            if on_chain_data and 'exchange_inflow' in on_chain_data and 'exchange_outflow' in on_chain_data:
+                net_flow = on_chain_data['exchange_inflow'] - on_chain_data['exchange_outflow']
+                crypto_indicators['exchange_net_flow'] = net_flow
+                crypto_indicators['flow_sentiment'] = 'bullish' if net_flow < 0 else 'bearish'
+            
+            # 4. MVRV Z-Score (Market Value to Realized Value)
+            if on_chain_data and all(k in on_chain_data for k in ['market_value', 'realized_value', 'std_dev']):
+                mvrv_z = (on_chain_data['market_value'] - on_chain_data['realized_value']) / on_chain_data['std_dev']
+                crypto_indicators['mvrv_z_score'] = mvrv_z
+                crypto_indicators['mvrv_signal'] = self._interpret_mvrv_zscore(mvrv_z)
+            
+            # 5. SOPR (Spent Output Profit Ratio)
+            if on_chain_data and 'sopr' in on_chain_data:
+                crypto_indicators['sopr'] = on_chain_data['sopr']
+                crypto_indicators['sopr_signal'] = 'profit_taking' if on_chain_data['sopr'] > 1.05 else 'capitulation' if on_chain_data['sopr'] < 0.95 else 'neutral'
+            
+            # 6. Stablecoin Supply Ratio
+            if market_data and 'stablecoin_supply' in market_data and 'total_crypto_mcap' in market_data:
+                ssr = market_data['stablecoin_supply'] / market_data['total_crypto_mcap']
+                crypto_indicators['stablecoin_supply_ratio'] = ssr
+                crypto_indicators['liquidity_signal'] = 'high_liquidity' if ssr > 0.1 else 'low_liquidity'
+            
+            # 7. Bitcoin Dominance Impact
+            if market_data and 'bitcoin_dominance' in market_data:
+                btc_dom = market_data['bitcoin_dominance']
+                crypto_indicators['bitcoin_dominance'] = btc_dom
+                crypto_indicators['market_rotation'] = 'altcoin_season' if btc_dom < 40 else 'bitcoin_season'
+            
+            # 8. Fear & Greed Index
+            if market_data and 'fear_greed_index' in market_data:
+                crypto_indicators['fear_greed_index'] = market_data['fear_greed_index']
+                crypto_indicators['market_sentiment'] = self._interpret_fear_greed(market_data['fear_greed_index'])
+            
+            # 9. Funding Rates (for perpetual contracts)
+            if market_data and 'funding_rate' in market_data:
+                crypto_indicators['funding_rate'] = market_data['funding_rate']
+                crypto_indicators['funding_signal'] = 'long_squeeze_risk' if market_data['funding_rate'] > 0.0005 else 'short_squeeze_risk' if market_data['funding_rate'] < -0.0005 else 'neutral'
+            
+            # 10. Volatility Regime (Crypto-specific)
+            crypto_indicators['crypto_volatility_regime'] = self._detect_crypto_volatility_regime(price_data)
+            
+            # 11. Halving Cycle Analysis (Bitcoin-specific)
+            if symbol == 'BTCUSDT':
+                crypto_indicators['halving_cycle_position'] = self._calculate_halving_cycle_position()
+                crypto_indicators['cycle_phase'] = self._identify_halving_cycle_phase()
+            
+            # 12. Miner Activity
+            if on_chain_data and 'miner_net_position' in on_chain_data:
+                crypto_indicators['miner_sentiment'] = 'accumulating' if on_chain_data['miner_net_position'] < 0 else 'distributing'
+            
+            return crypto_indicators
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating crypto indicators for {symbol}: {e}")
+            return {}
+    
+    def _interpret_mvrv_zscore(self, z_score: float) -> str:
+        """Interpret MVRV Z-Score for market positioning"""
+        if z_score > 8:
+            return "extreme_bubble"
+        elif z_score > 5:
+            return "overvalued"
+        elif z_score > 2:
+            return "fair_valu e_high"
+        elif z_score > -1:
+            return "fair_value"
+        elif z_score > -3:
+            return "undervalued"
+        else:
+            return "deep_undervalued"
+    
+    def _interpret_fear_greed(self, index: float) -> str:
+        """Interpret Fear & Greed Index"""
+        if index >= 75:
+            return "extreme_greed"
+        elif index >= 60:
+            return "greed"
+        elif index >= 45:
+            return "neutral"
+        elif index >= 25:
+            return "fear"
+        else:
+            return "extreme_fear"
+    
+    def _detect_crypto_volatility_regime(self, price_data: pd.DataFrame) -> str:
+        """Detect crypto-specific volatility regimes"""
+        try:
+            returns = price_data['close'].pct_change().dropna()
+            volatility = returns.rolling(20).std().iloc[-1]
+            
+            # Crypto-specific volatility thresholds
+            if volatility > 0.06:  # 6% daily volatility
+                return "hyper_volatility"
+            elif volatility > 0.04:  # 4% daily volatility
+                return "high_volatility"
+            elif volatility > 0.02:  # 2% daily volatility
+                return "moderate_volatility"
+            else:
+                return "low_volatility"
+                
+        except Exception as e:
+            self.logger.error(f"Error detecting crypto volatility regime: {e}")
+            return "moderate_volatility"
+    
+    def _calculate_halving_cycle_position(self) -> float:
+        """Calculate position in Bitcoin halving cycle (0-1 scale)"""
+        try:
+            # Bitcoin halving dates (approximate)
+            halving_dates = [
+                datetime(2012, 11, 28),
+                datetime(2016, 7, 9), 
+                datetime(2020, 5, 11),
+                datetime(2024, 4, 20)  # Estimated next halving
+            ]
+            
+            current_date = datetime.now()
+            
+            # Find current cycle
+            for i in range(len(halving_dates) - 1):
+                if halving_dates[i] <= current_date < halving_dates[i + 1]:
+                    cycle_start = halving_dates[i]
+                    cycle_end = halving_dates[i + 1]
+                    cycle_duration = (cycle_end - cycle_start).days
+                    days_into_cycle = (current_date - cycle_start).days
+                    
+                    return min(days_into_cycle / cycle_duration, 1.0)
+            
+            return 0.5  # Default if between cycles
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating halving cycle position: {e}")
+            return 0.5
+    
+    def _identify_halving_cycle_phase(self) -> str:
+        """Identify current phase in Bitcoin halving cycle"""
+        cycle_position = self._calculate_halving_cycle_position()
+        
+        if cycle_position < 0.25:
+            return "accumulation_phase"
+        elif cycle_position < 0.5:
+            return "early_bull"
+        elif cycle_position < 0.75:
+            return "late_bull"
+        else:
+            return "bear_market"
+    
+    # ENHANCED: Update regime detection to include crypto patterns
+    def _detect_market_regime_enhanced(self, close, high, low, volume, lookback=50):
+        """Enhanced regime detection with crypto-specific patterns"""
+        if len(close) < lookback:
+            return {'regime': 'neutral', 'confidence': 0.5, 'transition_prob': 0.5}
+        
+        # Original technical analysis
+        returns = close.pct_change().dropna()
+        volatility = returns.rolling(20).std().iloc[-1]
+        
+        y = close.iloc[-lookback:].values
+        x = np.arange(len(y))
+        slope, _, r_value, _, _ = stats.linregress(x, y)
+        r_squared = r_value ** 2
+        
+        # Crypto-specific adjustments
+        crypto_factors = self._calculate_crypto_regime_factors(close, volume)
+        
+        # Combined regime scoring
+        trend_score = (slope * 1000 + r_squared * crypto_factors['trend_alignment'] + 
+                      crypto_factors['on_chain_score']) / 3
+        
+        # Enhanced regime classification with crypto context
+        if crypto_factors['halving_cycle_boost'] > 0:
+            trend_score *= (1 + crypto_factors['halving_cycle_boost'])
+        
+        # Rest of original logic with crypto enhancements
+        regime_score = 0
+        if r_squared > 0.6 and abs(trend_score) > 0.1:
+            regime_score = trend_score
+        elif r_squared < 0.3:
+            regime_score = 0
+        else:
+            regime_score = trend_score * 0.5
+
+        regime_score = np.clip(regime_score + crypto_factors['macro_score'], -1, 1)
+
+        # Crypto-enhanced thresholds
+        threshold_trend = 0.25  # Slightly lower for crypto volatility
+        volatility = close.pct_change().rolling(20).std().iloc[-1]
+        
+        # Crypto-specific volatility thresholds
+        if volatility > 0.05:
+            threshold_trend *= 1.2  # Require stronger signals in high volatility
+        
+        # Determine regime with crypto context
+        if trend_score > threshold_trend:
+            regime = "bull_trend"
+            confidence = min(abs(trend_score) * crypto_factors['confidence_boost'], 0.9)
+        elif trend_score < -threshold_trend:
+            regime = "bear_trend"
+            confidence = min(abs(trend_score) * crypto_factors['confidence_boost'], 0.9)
+        elif volatility >= 0.05:
+            regime = "high_volatility"
+            confidence = min(volatility / 0.08, 0.8)
+        elif volatility <= 0.015:
+            regime = "ranging"
+            confidence = max(0.6, 1 - abs(trend_score) / threshold_trend)
+        else:
+            regime = "neutral"
+            confidence = 0.5
+
+        transition_prob = self._calculate_regime_transition_prob(regime)
+
+        return {
+            'regime': regime,
+            'confidence': confidence,
+            'transition_prob': transition_prob,
+            'crypto_factors': crypto_factors  # Include crypto context
+        }
+    
+    def _calculate_crypto_regime_factors(self, close: pd.Series, volume: pd.Series) -> Dict:
+        """Calculate crypto-specific factors for regime detection"""
+        factors = {
+            'trend_alignment': 0,
+            'on_chain_score': 0,
+            'halving_cycle_boost': 0,
+            'macro_score': 0,
+            'confidence_boost': 1.0
+        }
+        
+        try:
+            # On-chain momentum (simulated - would come from actual on-chain data)
+            volume_trend = self._calculate_slope(volume, 10)
+            if volume_trend > 0:
+                factors['on_chain_score'] += 0.2
+            
+            # Halving cycle influence
+            cycle_phase = self._identify_halving_cycle_phase()
+            if cycle_phase in ["accumulation_phase", "early_bull"]:
+                factors['halving_cycle_boost'] = 0.3
+            elif cycle_phase == "late_bull":
+                factors['halving_cycle_boost'] = 0.1
+            else:  # bear_market
+                factors['halving_cycle_boost'] = -0.2
+            
+            # Market cap dominance impact
+            if hasattr(self, 'bitcoin_dominance'):
+                if self.bitcoin_dominance > 55:
+                    factors['macro_score'] += 0.1  # Bitcoin dominance bullish
+                elif self.bitcoin_dominance < 40:
+                    factors['macro_score'] -= 0.1  # Altcoin season caution
+            
+            # Fear & Greed impact
+            if hasattr(self, 'fear_greed_index'):
+                if self.fear_greed_index > 75:
+                    factors['confidence_boost'] = 0.8  # Reduce confidence in extreme greed
+                elif self.fear_greed_index < 25:
+                    factors['confidence_boost'] = 1.2  # Increase confidence in extreme fear
+            
+            return factors
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating crypto regime factors: {e}")
+            return factors
 
     def calculate_momentum_alignment(self, df: pd.DataFrame) -> Dict:
         """Calculate momentum alignment across multiple timeframes and indicators"""

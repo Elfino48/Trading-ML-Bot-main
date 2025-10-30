@@ -584,7 +584,7 @@ class BybitClient:
                  logger.debug(f"Received pong from {stream_type}")
                  return # Successful pong received, confirms connection is alive
 
-            elif data.get("ping"): # Handle server-initiated ping
+            elif op == "ping": # Handle server-initiated ping
                  logger.info(f"Received server ping on {stream_type}, sending pong response.")
                  try:
                      ws_app.send(json.dumps({"op": "pong"}))
