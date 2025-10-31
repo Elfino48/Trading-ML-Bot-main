@@ -6,9 +6,9 @@ load_dotenv()
 
 # Bybit Configuration with Environment Variables
 BYBIT_CONFIG = {
-    "API_KEY": os.getenv("BYBIT_API_KEY", "SQcggP0oqtU1ZCnidS"),
-    "API_SECRET": os.getenv("BYBIT_API_SECRET", "h4jQYdx4RryCbUxROWarwIQUnKCANkV2UMZL"),
-    "BASE_URL": "https://api-demo.bybit.com",
+    "API_KEY": os.getenv("BYBIT_API_KEY", "86ZGMVwycRYeuBYRk6"),
+    "API_SECRET": os.getenv("BYBIT_API_SECRET", "5auq3d3Dmfl4VSrTgjCuqKvRdni8NeYywQBJ"),
+    "BASE_URL": "https://api.bybit.com",
     "WS_PUBLIC_URL": "wss://stream.bybit.com/v5/public/linear",
     "WS_PRIVATE_URL": "wss://stream.bybit.com/v5/private",
 }

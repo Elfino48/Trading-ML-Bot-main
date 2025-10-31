@@ -3,8 +3,8 @@ import threading
 import time
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional # Added Optional
-from decimal import Decimal, ROUND_DOWN # Import Decimal for precision
+from typing import Dict, List, Optional
+from decimal import Decimal, ROUND_DOWN
 from bybit_client import BybitClient
 from advanced_risk_manager import AdvancedRiskManager
 from config import SYMBOLS
@@ -22,37 +22,28 @@ class ExecutionEngine:
             self.max_retry_attempts = 3
             self.execution_quality_log = []
 
-            # --- Add Instrument Info Cache ---
             self.instrument_info_cache: Dict[str, Dict] = {}
             self.instrument_info_lock = threading.Lock()
-            self._fetch_initial_instrument_info() # Fetch rules at startup
-            # --- End Add ---
-
+            self._fetch_initial_instrument_info()
+            
             self.market_impact_model = MarketImpactModel()
             self.limit_order_strategies = LimitOrderStrategies()
             self.vwap_executor = VWAPExecutor(bybit_client)
             self.twap_executor = TWAPExecutor(bybit_client)
             self.smart_router = SmartOrderRouter(bybit_client)
 
-            self.main_bot = None # Add this
+            self.main_bot = None
             self._state_lock = threading.Lock()
 
             self._initialize_position_cache()
 
     def set_main_bot(self, main_bot_instance):
-        """
-        Gives the execution engine a reference to the main bot
-        to trigger reconciliation on trade closures.
-        """
         self.main_bot = main_bot_instance
 
-    # --- New Method: Fetch and Cache Instrument Info ---
     def _fetch_initial_instrument_info(self):
-        """Fetches and caches instrument rules at startup."""
         self.logger.info("Fetching initial instrument information...")
         try:
             with self.instrument_info_lock:
-                # Assuming linear perpetual contracts
                 params = {"category": "linear"}
                 response = self.client._request("GET", "/v5/market/instruments-info", params)
 
@@ -61,16 +52,16 @@ class ExecutionEngine:
                     count = 0
                     for instrument in instruments:
                         symbol = instrument.get('symbol')
-                        if symbol in SYMBOLS: # Only cache symbols we trade
+                        if symbol in SYMBOLS:
                             lot_size_filter = instrument.get('lotSizeFilter', {})
                             price_filter = instrument.get('priceFilter', {})
                             self.instrument_info_cache[symbol] = {
                                 'minOrderQty': Decimal(lot_size_filter.get('minOrderQty', '0')),
                                 'maxOrderQty': Decimal(lot_size_filter.get('maxOrderQty', '1000000')),
-                                'qtyStep': Decimal(lot_size_filter.get('qtyStep', '0.001')), # Qty precision
+                                'qtyStep': Decimal(lot_size_filter.get('qtyStep', '0.001')),
                                 'minPrice': Decimal(price_filter.get('minPrice', '0')),
                                 'maxPrice': Decimal(price_filter.get('maxPrice', '1000000')),
-                                'tickSize': Decimal(price_filter.get('tickSize', '0.01')) # Price precision
+                                'tickSize': Decimal(price_filter.get('tickSize', '0.01'))
                             }
                             count += 1
                     self.logger.info(f"Cached instrument info for {count}/{len(SYMBOLS)} symbols.")
@@ -80,18 +71,14 @@ class ExecutionEngine:
 
         except Exception as e:
             self.logger.error(f"Error fetching initial instrument info: {e}", exc_info=True)
-            # You might want to retry or handle this failure more robustly
-
-    # --- New Method: Get Instrument Info (Handles Cache Miss) ---
+            
     def get_instrument_info(self, symbol: str) -> Optional[Dict]:
-        """Gets instrument info from cache, fetches if missing."""
         with self.instrument_info_lock:
             info = self.instrument_info_cache.get(symbol)
 
         if info:
             return info
         else:
-            # Attempt to fetch missing info
             self.logger.warning(f"Instrument info for {symbol} not in cache, attempting fetch...")
             try:
                 params = {"category": "linear", "symbol": symbol}
@@ -129,14 +116,12 @@ class ExecutionEngine:
         self.emergency_protocols = emergency_protocols
 
     def _initialize_position_cache(self):
-            """Populates the initial position cache using REST API."""
             self.logger.info("Initializing position cache via REST...")
             try:
-                # Use the client's method directly
                 pos_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 if pos_response and pos_response.get('retCode') == 0:
                     with self._state_lock:
-                        self.position_cache.clear() # Clear existing before refresh
+                        self.position_cache.clear()
                         count = 0
                         for pos in pos_response['result'].get('list', []):
                             symbol = pos.get('symbol')
@@ -144,20 +129,16 @@ class ExecutionEngine:
                             avg_price_str = pos.get('avgPrice', '0')
                             pos_value_str = pos.get('positionValue', '0')
                             pnl_str = pos.get('unrealisedPnl', '0')
-                            liq_price_str = pos.get('liqPrice', '') # Get liqPrice, default to empty string
+                            liq_price_str = pos.get('liqPrice', '')
                             updated_time_str = pos.get('updatedTime', str(int(time.time()*1000)))
 
-                            # Safely convert strings to float, handling empty strings or invalid values
                             size = float(size_str) if size_str else 0.0
                             avg_price = float(avg_price_str) if avg_price_str else 0.0
                             pos_value = float(pos_value_str) if pos_value_str else 0.0
                             pnl = float(pnl_str) if pnl_str else 0.0
-                            # --- FIX: Handle empty string for liqPrice ---
                             liq_price = float(liq_price_str) if liq_price_str else 0.0
-                            # --- END FIX ---
                             updated_time = int(updated_time_str) if updated_time_str else int(time.time()*1000)
 
-                            # Only cache if symbol exists and size > 0? Or cache all? Cache non-zero for relevance.
                             if symbol and size > 0:
                                 self.position_cache[symbol] = {
                                     'size': size,
@@ -165,7 +146,7 @@ class ExecutionEngine:
                                     'avgPrice': avg_price,
                                     'positionValue': pos_value,
                                     'unrealisedPnl': pnl,
-                                    'liqPrice': liq_price, # Use the safely converted float
+                                    'liqPrice': liq_price,
                                     'updatedTime': updated_time
                                 }
                                 count += 1
@@ -173,7 +154,7 @@ class ExecutionEngine:
                 else:
                     err_msg = pos_response.get('retMsg', 'No response') if pos_response else 'No response'
                     self.logger.error(f"Failed to initialize position cache via REST: {err_msg}")
-            except ValueError as ve: # Catch potential float conversion errors more specifically
+            except ValueError as ve:
                 self.logger.error(f"Error converting position data string to float during cache init: {ve}. Position data: {pos}", exc_info=True)
             except Exception as e:
                 self.logger.error(f"Error initializing position cache: {e}", exc_info=True)
@@ -215,11 +196,8 @@ class ExecutionEngine:
 
                             size = float(pos_data.get('size', 0))
                             
-                            # --- REAL-TIME RECONCILIATION TRIGGER ---
-                            # Check the *previous* size from our cache
                             previous_size = self.position_cache.get(symbol, {}).get('size', 0)
                             
-                            # Update the cache *after* getting the previous size
                             side = pos_data.get('side')
                             avg_price = float(pos_data.get('avgPrice', 0))
                             pos_value = float(pos_data.get('positionValue', 0))
@@ -238,35 +216,29 @@ class ExecutionEngine:
                                 'updatedTime': updated_time
                             }
 
-                            # If position size *changed* to 0 from > 0, trigger reconciliation
                             if size == 0 and previous_size > 0 and self.main_bot is not None:
                                 self.logger.warning(f"WebSocket detected position closure for {symbol}. Triggering real-time reconciliation.")
                                 self.main_bot.trigger_reconciliation_for_symbol(symbol)
                             elif size == 0:
                                 self.logger.info(f"Position size updated to 0 for {symbol} via WS.")
-                            # --- END REAL-TIME RECONCILIATION TRIGGER ---
-
+                            
                 except Exception as e:
                     self.logger.error(f"Error processing private WS message: {e} | Message: {message}", exc_info=True)
 
     def _validate_trade_decision(self, decision: Dict) -> bool:
-            """Validates the structure and basic logic of a trade decision dictionary."""
             required_fields = ['symbol', 'action', 'quantity', 'position_size', 'current_price']
             for field in required_fields:
                 if field not in decision:
                     self.logger.error(f"Trade validation failed: Missing field '{field}' in decision: {decision}")
                     return False
-            # Check SYMBOLS from config
-            if decision['symbol'] not in SYMBOLS: # Make sure SYMBOLS is accessible
+            if decision['symbol'] not in SYMBOLS:
                 self.logger.error(f"Trade validation failed: Invalid symbol '{decision['symbol']}'")
                 return False
             if decision['action'] not in ['BUY', 'SELL', 'HOLD']:
                 self.logger.error(f"Trade validation failed: Invalid action '{decision['action']}'")
                 return False
-            # Allow HOLD action without quantity checks
             if decision['action'] == 'HOLD':
                 return True
-            # Checks for BUY/SELL actions
             if not isinstance(decision['quantity'], (int, float)) or decision['quantity'] <= 0:
                 self.logger.error(f"Trade validation failed: Non-positive quantity '{decision['quantity']}'")
                 return False
@@ -277,7 +249,6 @@ class ExecutionEngine:
                 self.logger.error(f"Trade validation failed: Non-positive current_price '{decision['current_price']}'")
                 return False
 
-            # SL/TP checks only needed for BUY/SELL
             if 'stop_loss' not in decision or 'take_profit' not in decision:
                 self.logger.error(f"Trade validation failed: Missing SL or TP for action '{decision['action']}'")
                 return False
@@ -288,7 +259,6 @@ class ExecutionEngine:
                 self.logger.error(f"Trade validation failed: Non-positive TP '{decision['take_profit']}'")
                 return False
 
-            # Add checks for SL/TP placement relative to current_price
             price = decision['current_price']
             sl = decision['stop_loss']
             tp = decision['take_profit']
@@ -309,9 +279,7 @@ class ExecutionEngine:
             return True
 
     def execute_limit_order(self, decision: Dict, strategy: str = 'aggressive') -> Dict:
-            """Executes a trade using a Limit Order based on smart routing."""
             try:
-                # --- Validation and Pre-checks ---
                 if not self._validate_trade_decision(decision):
                     return {'success': False, 'message': 'Trade validation failed'}
 
@@ -327,17 +295,14 @@ class ExecutionEngine:
 
                 position_size_usdt = decision['position_size']
                 quantity = decision['quantity']
-                # Price at decision time, used for analysis/impact estimation
                 current_price_at_decision = decision['current_price']
 
-                # --- Risk Check ---
                 risk_approval = self.risk_manager.can_trade(symbol, position_size_usdt)
                 if not risk_approval.get('approved'):
                     reason = risk_approval.get('reason', 'No reason specified')
                     self.logger.warning(f"Limit order rejected by Risk Manager for {symbol}: {reason}")
                     return {'success': False, 'message': f'Risk management rejected trade: {reason}'}
 
-                # --- Adjust Size if Necessary ---
                 adjusted_size = risk_approval.get('adjusted_size', position_size_usdt)
                 if adjusted_size != position_size_usdt:
                     if adjusted_size <= 0:
@@ -346,44 +311,37 @@ class ExecutionEngine:
                     position_size_usdt = adjusted_size
                     if current_price_at_decision > 0:
                         quantity = position_size_usdt / current_price_at_decision
-                        quantity = round(quantity, 3 if 'BTC' in symbol else 2 if 'ETH' in symbol else 1) # Example rounding
+                        quantity = round(quantity, 3 if 'BTC' in symbol else 2 if 'ETH' in symbol else 1)
                         self.logger.info(f"Adjusted limit order size for {symbol} to ${position_size_usdt:.2f} ({quantity} units) due to risk rules: {risk_approval.get('reason', '')}")
                     else:
                         self.logger.error(f"Cannot calculate adjusted quantity for limit order {symbol}: decision price is zero.")
                         return {'success': False, 'message': 'Cannot calculate quantity with zero price after risk adjustment.'}
 
-                # --- Final Quantity Check ---
-                min_order_qty = 0.001 # Example
+                min_order_qty = 0.001
                 if quantity < min_order_qty:
                     self.logger.warning(f"Skipping limit order for {symbol}: Final quantity {quantity} is below minimum {min_order_qty}.")
                     return {'success': False, 'message': f'Final quantity {quantity} is below minimum order size {min_order_qty}'}
 
-                # --- Smart Routing / Price Calculation ---
-                # Use current price at decision for routing analysis
                 orderbook_analysis = self._analyze_order_book(symbol)
                 optimal_execution = self.smart_router.find_optimal_execution(symbol, action, quantity, orderbook_analysis)
 
                 side = 'Buy' if action == 'BUY' else 'Sell'
 
-                # Decide execution based on router suggestion
                 if optimal_execution['strategy'] == 'limit':
                     limit_price = optimal_execution['price']
-                    # Ensure calculated limit price is valid
                     if limit_price <= 0:
                         self.logger.error(f"Smart router provided invalid limit price ({limit_price}) for {symbol}. Falling back to market.")
-                        # Fallback to market order if limit price is invalid
-                        decision['quantity'] = quantity # Update decision with potentially adjusted quantity
+                        decision['quantity'] = quantity
                         decision['position_size'] = position_size_usdt
                         return self.execute_enhanced_trade(decision)
 
                     market_impact = optimal_execution['estimated_impact']
 
-                    self.logger.info(f"🎯 Attempting LIMIT {action} for {symbol} at ${limit_price:.4f}") # More precision for limit
+                    self.logger.info(f"🎯 Attempting LIMIT {action} for {symbol} at ${limit_price:.4f}")
                     self.logger.info(f"   📊 Quantity: {quantity:.4f} units (${position_size_usdt:.2f})")
                     self.logger.info(f"   🛡️ SL: ${decision['stop_loss']:.2f}, TP: ${decision['take_profit']:.2f}")
                     self.logger.info(f"   Router Strategy: {strategy}, Estimated Impact: {market_impact:.4f}%")
 
-                    # --- Place Limit Order ---
                     order_response = self.client.place_order(
                         symbol=symbol,
                         side=side,
@@ -392,14 +350,12 @@ class ExecutionEngine:
                         price=limit_price,
                         stop_loss=decision['stop_loss'],
                         take_profit=decision['take_profit'],
-                        time_in_force='GoodTillCancel' # Or 'PostOnly' etc. based on strategy
+                        time_in_force='GoodTillCancel'
                     )
 
-                    # --- Process Response ---
                     if order_response and order_response.get('retCode') == 0:
                         order_id = order_response['result']['orderId']
 
-                        # --- Update Internal State ---
                         with self._state_lock:
                             self.open_orders[order_id] = {
                                 'symbol': symbol, 'order_id': order_id, 'side': side,
@@ -407,27 +363,23 @@ class ExecutionEngine:
                                 'timestamp': time.time(), 'status': 'New', 'type': 'Limit',
                                 'strategy': strategy
                             }
-                        # --------------------------
-
-                        # Log execution quality based on INTENDED price vs limit price placed
+                        
                         self._log_execution_quality('LIMIT_PLACED', symbol, current_price_at_decision, limit_price, quantity, market_impact)
 
-                        # --- Prepare Trade Record (Order Placement) ---
                         trade_record = {**decision}
                         trade_record.update({
                             'timestamp': time.time(), 'side': side,
-                            'entry_price': None, # Not filled yet
+                            'entry_price': None,
                             'limit_price_placed': limit_price,
                             'order_id': order_id,
-                            'success': True, # Order placed successfully
-                            'status': 'New' # Initial status
+                            'success': True,
+                            'status': 'New'
                         })
                         trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
                         self.trade_history.append(trade_record)
 
                         self.logger.info(f"✅ Limit order for {symbol} placed successfully! Order ID: {order_id}")
 
-                        # --- Return Success Result ---
                         return {
                             'success': True,
                             'order_id': order_id,
@@ -437,31 +389,26 @@ class ExecutionEngine:
                             'limit_price': limit_price,
                             'strategy': strategy,
                             'execution_quality': optimal_execution['quality'],
-                            'status': 'New' # Indicate order is placed but not filled
+                            'status': 'New'
                         }
                     else:
-                        # --- Handle Order Placement Failure ---
                         error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
                         ret_code = order_response.get('retCode', -1) if order_response else -1
                         self.logger.error(f"❌ Limit order placement failed for {symbol}: {error_msg} (Code: {ret_code})")
-                        # Log failure
                         trade_record = {**decision}
                         trade_record.update({ 'timestamp': time.time(), 'side': side, 'success': False, 'error_message': f"Code {ret_code}: {error_msg}" })
                         trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
                         self.trade_history.append(trade_record)
                         return {'success': False, 'message': f'Limit order failed ({ret_code}): {error_msg}'}
                 else:
-                    # --- Execute via Algorithmic Order (VWAP/TWAP) or Fallback Market ---
                     self.logger.info(f"Smart router suggests '{optimal_execution['strategy']}' for {symbol}. Executing...")
-                    decision['quantity'] = quantity # Ensure decision uses potentially adjusted quantity
+                    decision['quantity'] = quantity
                     decision['position_size'] = position_size_usdt
                     return self._execute_algorithmic_order(decision, optimal_execution)
 
             except Exception as e:
-                # --- Handle Unexpected Errors ---
                 symbol_for_log = decision.get('symbol', 'UNKNOWN') if isinstance(decision, dict) else 'UNKNOWN'
                 self.logger.error(f"❌ Exception during limit order execution for {symbol_for_log}: {e}", exc_info=True)
-                # Log failure attempt if possible
                 if isinstance(decision, dict) and 'action' in decision and decision['action'] != 'HOLD':
                     try:
                             trade_record = {**decision}
@@ -472,9 +419,7 @@ class ExecutionEngine:
                 return {'success': False, 'message': f'Limit order execution engine error: {e}'}
 
     def execute_adaptive_trade(self, decision: Dict) -> Dict:
-            """Dynamically chooses execution strategy based on market conditions."""
             try:
-                # --- Validation and Pre-checks ---
                 if not self._validate_trade_decision(decision):
                     return {'success': False, 'message': 'Trade validation failed'}
                 symbol = decision['symbol']
@@ -484,48 +429,41 @@ class ExecutionEngine:
                     return {'success': False, 'message': 'Emergency mode active'}
 
                 quantity = decision['quantity']
-                current_price = decision['current_price'] # Price at decision time
+                current_price = decision['current_price']
                 position_size_usdt = decision['position_size']
 
-                # --- Risk Check ---
                 risk_approval = self.risk_manager.can_trade(symbol, position_size_usdt)
                 if not risk_approval.get('approved'):
                     return {'success': False, 'message': f'Risk rejected: {risk_approval.get("reason", "")}'}
-                # Adjust size/qty if needed
                 adjusted_size = risk_approval.get('adjusted_size', position_size_usdt)
                 if adjusted_size != position_size_usdt:
                     if adjusted_size <= 0: return {'success': False, 'message': 'Adjusted size non-positive'}
                     position_size_usdt = adjusted_size
                     if current_price <= 0: return {'success': False, 'message': 'Cannot recalc qty, price zero'}
                     quantity = position_size_usdt / current_price
-                    quantity = round(quantity, 3 if 'BTC' in symbol else 2) # Example rounding
+                    quantity = round(quantity, 3 if 'BTC' in symbol else 2)
                     self.logger.info(f"Adaptive trade size adjusted for {symbol} to ${position_size_usdt:.2f} ({quantity})")
 
-                # Update decision dict with potentially adjusted values
                 decision['position_size'] = position_size_usdt
                 decision['quantity'] = quantity
 
-                min_order_qty = 0.001 # Example
+                min_order_qty = 0.001
                 if quantity < min_order_qty:
                     return {'success': False, 'message': f'Final quantity {quantity} below minimum'}
 
 
-                # --- Adaptive Strategy Selection ---
                 self.logger.info(f"🧠 Selecting adaptive strategy for {symbol} {action} {quantity:.4f}...")
                 execution_quality = self._get_recent_execution_quality(symbol)
-                market_conditions = self._analyze_market_conditions(symbol, quantity) # Needs implementation
+                market_conditions = self._analyze_market_conditions(symbol, quantity)
                 orderbook_analysis = self._analyze_order_book(symbol)
 
-                strategy = 'smart_limit' # Default
+                strategy = 'smart_limit'
 
-                # --- Simplified Logic Example ---
                 if market_conditions.get('high_volatility') or execution_quality.get('poor_fill_rate', False):
                     strategy = 'market'
                     self.logger.info("   -> High volatility or poor fills detected. Choosing MARKET.")
-                elif quantity > market_conditions.get('optimal_limit_size', quantity * 1.5): # If order is large relative to near book depth
-                    # Use VWAP/TWAP for larger orders
-                    # More sophisticated logic could use orderbook depth analysis
-                    vwap_threshold_usd = 10000 # Example threshold
+                elif quantity > market_conditions.get('optimal_limit_size', quantity * 1.5):
+                    vwap_threshold_usd = 10000
                     if position_size_usdt > vwap_threshold_usd:
                         strategy = 'vwap'
                         self.logger.info(f"   -> Large order size (${position_size_usdt:.0f} > ${vwap_threshold_usd}). Choosing VWAP.")
@@ -533,18 +471,15 @@ class ExecutionEngine:
                         strategy = 'twap'
                         self.logger.info("   -> Moderate order size relative to depth. Choosing TWAP.")
                 else:
-                    strategy = 'smart_limit' # Default to smart limit if conditions seem ok
+                    strategy = 'smart_limit'
                     self.logger.info("   -> Conditions suitable. Choosing SMART LIMIT.")
-                # --- End Simplified Logic ---
-
-                # --- Execute Based on Selected Strategy ---
+                
                 if strategy == 'market':
-                    return self.execute_enhanced_trade(decision) # Use enhanced market order
+                    return self.execute_enhanced_trade(decision)
                 elif strategy in ['vwap', 'twap']:
-                    # Pass decision dict for SL/TP etc.
                     return self._execute_algorithmic_order(decision, {'strategy': strategy})
-                else: # smart_limit or default limit
-                    return self.execute_limit_order(decision, strategy='adaptive') # Pass specific strategy context
+                else:
+                    return self.execute_limit_order(decision, strategy='adaptive')
 
             except Exception as e:
                 symbol_for_log = decision.get('symbol', 'UNKNOWN') if isinstance(decision, dict) else 'UNKNOWN'
@@ -552,11 +487,9 @@ class ExecutionEngine:
                 return {'success': False, 'message': f'Adaptive trade execution engine error: {e}'}
 
     def _execute_algorithmic_order(self, decision: Dict, execution_plan: Dict) -> Dict:
-            """Routes execution to VWAP or TWAP executors."""
             symbol = decision['symbol']
-            action = decision['action'] # BUY/SELL
+            action = decision['action']
             quantity = decision['quantity']
-            # Current price not strictly needed by VWAP/TWAP, but good for context
             current_price = decision['current_price']
             strategy = execution_plan.get('strategy', 'unknown')
 
@@ -564,32 +497,27 @@ class ExecutionEngine:
 
             try:
                 if strategy == 'vwap':
-                    # Pass the full decision dictionary to VWAP/TWAP for SL/TP etc.
                     result = self.vwap_executor.execute_vwap(
-                        symbol, action, quantity, decision, execution_plan.get('duration', 300) # Default 5 mins
+                        symbol, action, quantity, decision, execution_plan.get('duration', 300)
                     )
                 elif strategy == 'twap':
                     result = self.twap_executor.execute_twap(
-                        symbol, action, quantity, decision, execution_plan.get('duration', 300) # Default 5 mins
+                        symbol, action, quantity, decision, execution_plan.get('duration', 300)
                     )
                 else:
                     self.logger.warning(f"Unknown algorithmic strategy '{strategy}' requested for {symbol}. Falling back to market.")
                     return self.execute_enhanced_trade(decision)
 
-                # --- Log Algo Execution Attempt ---
-                # Algo executors should return success status and details
                 if result.get('success'):
-                    # Log overall success, details might be logged within executor
                     self.logger.info(f"✅ {strategy.upper()} execution for {symbol} reported success. Total executed: {result.get('total_executed', 0):.4f}")
-                    # Record a single trade entry representing the algo order
                     trade_record = {**decision}
                     trade_record.update({
                         'timestamp': time.time(),
                         'side': 'Buy' if action == 'BUY' else 'Sell',
-                        'entry_price': result.get('average_price'), # Use avg price if available
-                        'order_id': f"{strategy.upper()}_{int(time.time())}", # Placeholder ID
-                        'success': True, # Request placed
-                        'status': 'Completed' if result.get('completion_rate', 0) >= 0.99 else 'PartiallyCompleted', # Indicate algo execution status
+                        'entry_price': result.get('average_price'),
+                        'order_id': f"{strategy.upper()}_{int(time.time())}",
+                        'success': True,
+                        'status': 'Completed' if result.get('completion_rate', 0) >= 0.99 else 'PartiallyCompleted',
                         'algo_strategy': strategy,
                         'total_executed_qty': result.get('total_executed')
                     })
@@ -602,7 +530,7 @@ class ExecutionEngine:
                     trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
                     self.trade_history.append(trade_record)
 
-                return result # Return the result from the algo executor
+                return result
 
             except Exception as e:
                 self.logger.error(f"❌ Exception routing to algorithmic execution ({strategy}) for {symbol}: {e}", exc_info=True)
@@ -900,10 +828,7 @@ class ExecutionEngine:
             return {'success': False, 'message': f'Execution error: {e}'}
     
     def execute_enhanced_trade(self, decision: Dict):
-        """Executes a trade based on the enhanced decision dictionary via Market Order."""
-        # --- Define Minimum Order Value ---
-        MIN_ORDER_VALUE_USDT = 5.0 # Set Bybit's minimum USDT value for linear perpetuals
-        # --- End Definition ---
+        MIN_ORDER_VALUE_USDT = 5.0
         try:
             if not self._validate_trade_decision(decision):
                 return {'success': False, 'message': 'Trade validation failed before execution'}
@@ -964,12 +889,34 @@ class ExecutionEngine:
 
             final_quantity_str = str(adjusted_quantity_decimal)
             final_quantity_float = float(adjusted_quantity_decimal)
-            final_size_usdt = final_quantity_float * current_price_at_decision
+            
+            fresh_current_price = decision['current_price']
+            analysis_price = decision.get('analysis_price')
 
-            # --- ADD MINIMUM ORDER VALUE CHECK ---
+            original_stop_loss = decision['stop_loss']
+            original_take_profit = decision['take_profit']
+
+            stop_loss = original_stop_loss
+            take_profit = original_take_profit
+
+            if analysis_price and analysis_price > 0 and abs(fresh_current_price - analysis_price) > 1e-6:
+                price_delta = fresh_current_price - analysis_price
+                
+                stop_loss = original_stop_loss + price_delta
+                take_profit = original_take_profit + price_delta
+                
+                self.logger.info(f"   🔄 Recalculating SL/TP for {symbol} due to price change:")
+                self.logger.info(f"      Analysis Price: ${analysis_price:.4f}, Fresh Price: ${fresh_current_price:.4f} (Delta: ${price_delta:.4f})")
+                self.logger.info(f"      Old SL: ${original_stop_loss:.4f}, New SL: ${stop_loss:.4f}")
+                self.logger.info(f"      Old TP: ${original_take_profit:.4f}, New TP: ${take_profit:.4f}")
+
+            else:
+                self.logger.info(f"   ✅ SL/TP require no adjustment. Fresh Price: ${fresh_current_price:.4f}")
+
+            final_size_usdt = final_quantity_float * fresh_current_price
+            
             if final_size_usdt < MIN_ORDER_VALUE_USDT:
                 self.logger.warning(f"Skipping trade for {symbol}: Final order value ${final_size_usdt:.4f} is below minimum ${MIN_ORDER_VALUE_USDT:.2f} USDT.")
-                # Log this as a failed trade attempt for tracking
                 trade_record = {**decision}
                 trade_record.update({
                     'timestamp': time.time(), 'side': 'Buy' if action == 'BUY' else 'Sell',
@@ -983,24 +930,19 @@ class ExecutionEngine:
                 self.trade_history.append(trade_record)
                 if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
                     self.risk_manager.database.store_trade(trade_record)
-                # No need to call risk_manager.record_trade_outcome as no order was placed
-
+                
                 return {'success': False, 'message': f'Order value ${final_size_usdt:.4f} below minimum ${MIN_ORDER_VALUE_USDT:.2f}'}
-            # --- END MINIMUM ORDER VALUE CHECK ---
-
-
+            
             self.logger.info(f"🎯 Attempting Enhanced {action} for {symbol}")
             self.logger.info(f"   📊 Final Quantity: {final_quantity_str} units (~${final_size_usdt:.2f})")
-            self.logger.info(f"   🛡️ Stop Loss: ${decision['stop_loss']:.2f}")
-            self.logger.info(f"   🎯 Take Profit: ${decision['take_profit']:.2f}")
+            self.logger.info(f"   🛡️ Stop Loss: ${stop_loss:.2f}")
+            self.logger.info(f"   🎯 Take Profit: ${take_profit:.2f}")
             self.logger.info(f"   ⚖️ Risk/Reward: {decision.get('risk_reward_ratio', 0):.2f}:1")
             self.logger.info(f"   📈 Confidence: {decision.get('confidence', 0):.1f}%")
             self.logger.info(f"   🌡️ Market Regime: {decision.get('market_regime', 'N/A')}")
 
             side = 'Buy' if action == 'BUY' else 'Sell'
-            stop_loss = decision['stop_loss']
-            take_profit = decision['take_profit']
-
+            
             market_impact = self.market_impact_model.estimate_impact(symbol, final_quantity_float, side)
 
             order_response = self.client.place_order(
@@ -1016,7 +958,7 @@ class ExecutionEngine:
             if order_response and order_response.get('retCode') == 0:
                 order_id = order_response['result']['orderId']
                 executed_price_str = order_response['result'].get('avgPrice', '0')
-                executed_price = float(executed_price_str) if executed_price_str and executed_price_str != '0' else current_price_at_decision
+                executed_price = float(executed_price_str) if executed_price_str and executed_price_str != '0' else fresh_current_price
 
                 with self._state_lock:
                     self.open_orders[order_id] = {
@@ -1026,31 +968,22 @@ class ExecutionEngine:
                         'type': 'Market', 'avgPrice': executed_price
                     }
 
-                    # --- START FIX: Optimistically update position_cache ---
-                    # This ensures the bot knows it has an open position
-                    # so that real-time closure messages are handled correctly.
                     current_pos_data = self.position_cache.get(symbol, {})
                     old_size = current_pos_data.get('size', 0)
-                    
-                    # Note: This simple addition assumes the bot's logic
-                    # doesn't open opposing positions (hedging), which is correct.
-                    # Bybit's WS position update will send the "true" aggregated
-                    # data shortly after, but this sets the size > 0 immediately.
                     
                     new_size = old_size + final_quantity_float
                     
                     self.position_cache[symbol] = {
                         'size': new_size,
                         'side': side,
-                        'avgPrice': executed_price, # This is an approximation
-                        'positionValue': new_size * executed_price, # Approximation
+                        'avgPrice': executed_price,
+                        'positionValue': new_size * executed_price,
                         'unrealisedPnl': 0,
-                        'liqPrice': 0, # Unknown
+                        'liqPrice': 0,
                         'updatedTime': int(time.time() * 1000)
                     }
                     self.logger.info(f"Optimistically updated position_cache for {symbol}: New size {new_size}")
-                    # --- END FIX ---
-
+                    
                 self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
 
                 trade_record = {**decision}
@@ -1062,6 +995,8 @@ class ExecutionEngine:
                     'entry_price': executed_price,
                     'order_id': order_id,
                     'success': True,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit
                 })
                 trade_record.pop('signals', None)
                 trade_record.pop('market_context', None)
@@ -1074,12 +1009,8 @@ class ExecutionEngine:
 
                 self.logger.info(f"✅ Enhanced trade for {symbol} placed successfully! Order ID: {order_id}")
 
-                # --- FIX: Call record_trade_outcome on successful execution ---
-                # Assuming success means placed, not necessarily filled profitably yet
                 self.risk_manager.record_trade_outcome(successful=True, pnl=0)
-                # --- END FIX ---
-
-
+                
                 return {
                     'success': True, 'order_id': order_id, 'symbol': symbol, 'side': side,
                     'quantity': final_quantity_float,
@@ -1093,12 +1024,9 @@ class ExecutionEngine:
                 error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
                 ret_code = order_response.get('retCode', -1) if order_response else -1
 
-                # --- NEW: Check for ignorable "not enough balance" error ---
                 if ret_code == 110007:
                     self.logger.info(f"ℹ️ Trade skipped for {symbol}: {error_msg} (Code: {ret_code}). This is NOT an error.")
-                    # Return success=False but don't log as error, don't store in DB, don't record as loss
                     return {'success': False, 'message': f'Skipped: {error_msg} (Code: {ret_code})'}
-                # --- END NEW CHECK ---
                 
                 self.logger.error(f"❌ Enhanced trade order failed for {symbol}: {error_msg} (Code: {ret_code})")
 
@@ -1118,10 +1046,8 @@ class ExecutionEngine:
                 if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
                     self.risk_manager.database.store_trade(trade_record)
 
-                # --- FIX: Call record_trade_outcome on failed execution ---
                 self.risk_manager.record_trade_outcome(successful=False, pnl=0)
-                # --- END FIX ---
-
+                
                 return {'success': False, 'message': f'Order failed ({ret_code}): {error_msg}'}
 
         except Exception as e:
@@ -1147,54 +1073,46 @@ class ExecutionEngine:
                     if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
                         self.risk_manager.database.store_trade(trade_record)
 
-                    # --- FIX: Call record_trade_outcome on exception ---
                     self.risk_manager.record_trade_outcome(successful=False, pnl=0)
-                    # --- END FIX ---
                 except: pass
             return {'success': False, 'message': f'Execution engine error: {e}'}
     
     def execute_trade_with_retry(self, decision: Dict, max_retries: int = None):
-            """Attempts to execute a trade using adaptive strategy with retries on failure."""
             if max_retries is None:
                 max_retries = self.max_retry_attempts
 
             for attempt in range(max_retries):
                 try:
-                    # Use adaptive execution by default for retries
                     self.logger.info(f"Trade attempt {attempt + 1}/{max_retries} for {decision.get('symbol')} using adaptive execution...")
                     result = self.execute_adaptive_trade(decision)
 
                     if result.get('success'):
-                        # Check if order needs monitoring (e.g., Limit, Algo)
-                        if 'order_id' in result and result.get('status') == 'New': # Check if it's a limit order status
+                        if 'order_id' in result and result.get('status') == 'New':
                             self.logger.info(f"Order {result['order_id']} placed, requires monitoring.")
                         elif result.get('strategy') in ['VWAP', 'TWAP']:
                             self.logger.info(f"{result['strategy']} execution initiated.")
-                        return result # Return success immediately
+                        return result
                     else:
                         self.logger.warning(f"⚠️ Trade attempt {attempt + 1} failed: {result.get('message', 'No details')}")
-                        # Decide if error is retryable (e.g., timeout, rate limit vs insufficient funds)
                         msg_lower = result.get('message', '').lower()
                         is_retryable = "timeout" in msg_lower or \
                                     "rate limit" in msg_lower or \
                                     "busy" in msg_lower or \
                                     "connection" in msg_lower or \
-                                    "order failed (10006)" in msg_lower # Example: Order queue full / system busy
+                                    "order failed (10006)" in msg_lower
 
-                        # Do NOT retry critical errors like insufficient balance, invalid params etc.
                         is_critical_error = "balance" in msg_lower or \
                                             "margin" in msg_lower or \
                                             "parameter" in msg_lower or \
                                             "invalid" in msg_lower
 
                         if is_retryable and not is_critical_error and attempt < max_retries - 1:
-                            wait_time = (attempt + 1) * 2 # Exponential backoff might be better
+                            wait_time = (attempt + 1) * 2
                             self.logger.info(f"🔄 Retrying in {wait_time} seconds...")
                             time.sleep(wait_time)
                         else:
                             self.logger.error(f"❌ Trade failed after attempt {attempt + 1}. Not retrying (Retryable: {is_retryable}, Critical: {is_critical_error}).")
-                            # Record final failure (already done within execute methods)
-                            return result # Return the final failure result
+                            return result
 
                 except Exception as e:
                     self.logger.error(f"❌ Exception during trade attempt {attempt + 1} for {decision.get('symbol')}: {e}", exc_info=True)
@@ -1204,7 +1122,6 @@ class ExecutionEngine:
                         time.sleep(wait_time)
                     else:
                         self.logger.error(f"❌ Trade failed after attempt {attempt + 1} due to exception.")
-                        # Log failure attempt
                         try:
                             trade_record = {**decision}
                             trade_record.update({ 'timestamp': time.time(), 'success': False, 'error_message': f'Retry Exception: {e}'})
@@ -1213,22 +1130,18 @@ class ExecutionEngine:
                         except: pass
                         return {'success': False, 'message': f'All attempts failed after exception: {e}'}
 
-            # Fallback if loop completes unexpectedly
             self.logger.error(f"❌ All {max_retries} trade attempts failed for {decision.get('symbol')}.")
             return {'success': False, 'message': f'All {max_retries} trade attempts failed'}
     
     def cancel_all_orders(self, symbol: str = None):
-            """Cancels all open orders, optionally filtered by symbol."""
             try:
                 params = {"category": "linear"}
                 if symbol:
                     params["symbol"] = symbol
-                # Assuming self.client._request exists and is correct for POST /v5/order/cancel-all
                 response = self.client._request("POST", "/v5/order/cancel-all", params)
 
                 if response and response.get('retCode') == 0:
                     self.logger.info(f"✅ Cancel all orders request successful for {symbol if symbol else 'all symbols'}")
-                    # --- Update Internal State ---
                     with self._state_lock:
                         orders_to_remove = []
                         for order_id, order_details in self.open_orders.items():
@@ -1240,52 +1153,41 @@ class ExecutionEngine:
                                 del self.open_orders[order_id]
                                 removed_count += 1
                         self.logger.info(f"Removed {removed_count} orders from internal tracking after cancel-all for {symbol or 'all'}.")
-                    # --------------------------
                 else:
                     error_msg = response.get('retMsg', 'Unknown error') if response else 'No response'
                     self.logger.error(f"❌ Cancel all orders request failed: {error_msg}")
 
-                return response # Return raw response
+                return response
             except Exception as e:
                 self.logger.error(f"❌ Exception canceling orders: {e}", exc_info=True)
                 return None
     
     def get_position_info(self, symbol: str = None):
-            """Gets position info, preferring WS cache but falling back to REST."""
             self.logger.debug(f"Getting position info for {symbol or 'all'}...")
             with self._state_lock:
                 if symbol:
                     cached = self.position_cache.get(symbol)
-                    # Check if cache is reasonably fresh (e.g., < 30 seconds old)
                     is_fresh = cached and (time.time()*1000 - cached.get('updatedTime', 0) < 30000)
                     if cached and is_fresh:
                         self.logger.debug(f"Returning cached position for {symbol}")
-                        # Format similar to REST response for compatibility
-                        # Ensure all necessary fields from REST are included if possible
                         rest_like_cache = {
                             "symbol": symbol,
-                            "size": str(cached.get('size', 0)), # REST uses strings
+                            "size": str(cached.get('size', 0)),
                             "side": cached.get('side'),
                             "avgPrice": str(cached.get('avgPrice', 0)),
                             "positionValue": str(cached.get('positionValue', 0)),
                             "unrealisedPnl": str(cached.get('unrealisedPnl', 0)),
                             "liqPrice": str(cached.get('liqPrice', 0)),
-                            "updatedTime": str(int(cached.get('updatedTime', 0))), # REST uses string timestamp
-                            # Add other fields if needed, e.g., leverage, markPrice (not usually in WS pos update)
-                            "leverage": "0", # Placeholder
-                            "markPrice": "0" # Placeholder
+                            "updatedTime": str(int(cached.get('updatedTime', 0))),
+                            "leverage": "0",
+                            "markPrice": "0"
                         }
                         return {'retCode': 0, 'result': {'list': [rest_like_cache] if rest_like_cache['size'] != '0' else []}, 'retMsg': 'OK (from cache)'}
-                # else: # Requesting all symbols - difficult to check freshness easily, rely on REST or reconcile
-                #     pass
-
-            # Fallback to REST API
+                
             self.logger.debug(f"Cache miss or stale for {symbol or 'all'}, fetching via REST...")
             try:
-                response = self.client.get_position_info(category="linear", settleCoin="USDT") # Use client's method
-                # Optionally update cache here if REST was used? Handled by reconcile.
+                response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 if response and response.get('retCode') == 0:
-                    # Update cache upon successful REST fetch for consistency
                     with self._state_lock:
                         if symbol:
                             pos_list = response['result'].get('list', [])
@@ -1297,9 +1199,9 @@ class ExecutionEngine:
                                     'unrealisedPnl': float(pos_data.get('unrealisedPnl', 0)), 'liqPrice': float(pos_data.get('liqPrice', 0)),
                                     'updatedTime': int(pos_data.get('updatedTime', time.time()*1000))
                                 }
-                            elif symbol in self.position_cache: # If REST shows no position, clear cache
+                            elif symbol in self.position_cache:
                                 del self.position_cache[symbol]
-                        else: # Update all symbols
+                        else:
                             self.position_cache.clear()
                             for pos_data in response['result'].get('list', []):
                                     sym = pos_data.get('symbol')
@@ -1313,52 +1215,40 @@ class ExecutionEngine:
                 return response
             except Exception as e:
                 self.logger.error(f"❌ Error getting position info via REST fallback for {symbol or 'all'}: {e}")
-                # Ensure error handler is called if defined in BybitClient's method
-                # If not, call it here:
-                # if self.client.error_handler:
-                #     self.client.error_handler.handle_api_error(e, f"get_position_info ({symbol or 'all'})")
-                return None # Or return error structure
+                
+                return None
     
     def get_order_status(self, symbol: str, order_id: str):
-            """Gets order status, checking internal state first."""
             with self._state_lock:
                 if order_id in self.open_orders:
-                    order_details = self.open_orders[order_id].copy() # Get a copy
-                    # Check if recently updated by WS (e.g., within 30s)
+                    order_details = self.open_orders[order_id].copy()
                     ws_update_time = order_details.get('updatedTime', 0)
                     is_fresh = time.time()*1000 - ws_update_time < 30000
                     current_status = order_details.get('status')
 
-                    # If WS provided a final status recently, trust it short-term
                     if is_fresh and current_status in ['Filled', 'Cancelled', 'Rejected', 'Expired', 'PartiallyFilledCanceled']:
                         self.logger.debug(f"Returning cached final order status for {order_id}: {current_status}")
-                        # Format similar to REST /v5/order/history response
                         rest_like_cache = {
                             "symbol": symbol, "orderId": order_id, "side": order_details.get('side'),
                             "qty": str(order_details.get('quantity', 0)), "orderStatus": current_status,
                             "avgPrice": str(order_details.get('avgPrice', 0)),
                             "cumExecQty": str(order_details.get('cumExecQty', 0)),
                             "orderType": order_details.get('type', 'Unknown'),
-                            "createTime": str(int(order_details.get('timestamp', 0)*1000)), # Approx
+                            "createTime": str(int(order_details.get('timestamp', 0)*1000)),
                             "updateTime": str(int(ws_update_time)),
-                            # Add other fields if available and needed
                         }
                         return {'retCode': 0, 'result': {'list': [rest_like_cache]}, 'retMsg': 'OK (from cache)'}
                     elif is_fresh:
                         self.logger.debug(f"Returning cached active order status for {order_id}: {current_status}")
-                        # Still return cached non-final status if fresh
-                        rest_like_cache = { "symbol": symbol, "orderId": order_id, "orderStatus": current_status, #... other fields ...
+                        rest_like_cache = { "symbol": symbol, "orderId": order_id, "orderStatus": current_status,
                                             }
                         return {'retCode': 0, 'result': {'list': [rest_like_cache]}, 'retMsg': 'OK (from cache)'}
 
 
-            # Fallback to REST API if not found, stale, or still 'New'/'Unknown'
             self.logger.debug(f"Cache miss, stale, or non-final status for order {order_id}. Fetching via REST...")
             try:
-                # Assuming self.client.get_order_status exists and wraps the API call to /v5/order/history
                 response = self.client.get_order_status(symbol, order_id)
 
-                # Update internal cache based on REST result
                 if response and response.get('retCode') == 0 and response['result'].get('list'):
                     rest_data = response['result']['list'][0]
                     rest_status = rest_data.get('orderStatus')
@@ -1373,63 +1263,50 @@ class ExecutionEngine:
                                     del self.open_orders[rest_order_id]
                                     self.logger.info(f"Removed order {rest_order_id} from tracking based on REST status: {rest_status}")
                         elif rest_status not in ['Filled', 'Cancelled', 'Rejected', 'Expired', 'PartiallyFilledCanceled']:
-                                # If REST shows an active order not tracked, maybe add it back? Log for now.
                                 self.logger.warning(f"REST found active order {rest_order_id} ({rest_status}) not currently tracked internally.")
 
                 return response
             except Exception as e:
                 self.logger.error(f"❌ Error getting order status via REST fallback for {order_id}: {e}")
-                # Ensure error handler is called if needed (might be in client method)
+                
                 return None
 
     def execute_guaranteed_position_closure(self, symbol: str, max_attempts: int = 3) -> Dict:
-            """Attempts closure using multiple methods until verified."""
             self.logger.info(f"🛡️ Attempting guaranteed position closure for {symbol}")
             closure_methods = [self.close_position, self._force_close_position, self._emergency_position_closure]
             final_result = {'success': False, 'message': 'Closure attempts failed'}
 
             for attempt in range(max_attempts):
-                # Cycle through methods: close -> force_close -> emergency -> close ...
                 method_to_try = closure_methods[attempt % len(closure_methods)]
                 self.logger.info(f"Guaranteed closure attempt {attempt + 1}/{max_attempts} for {symbol} using {method_to_try.__name__}...")
                 try:
-                    # Execute the closure method
                     result = method_to_try(symbol)
-                    # Store the result of the *last* attempt regardless of verification success
                     final_result = result
 
-                    # Check if position is actually closed using enhanced verification
-                    # Increase timeout on later attempts
                     if self._verify_position_closure(symbol, timeout=7 + attempt * 3):
                         self.logger.info(f"✅ Guaranteed closure for {symbol} successful and VERIFIED after attempt {attempt + 1}.")
-                        # Ensure final result reflects success
                         final_result['success'] = True
                         final_result['message'] = final_result.get('message', 'Position closed and verified.')
-                        return final_result # Exit loop on verified success
+                        return final_result
                     else:
                         self.logger.warning(f"Closure attempt {attempt + 1} for {symbol} finished (Method Success: {result.get('success', False)}), but verification FAILED. Retrying...")
-                        # Add delay before next attempt
                         time.sleep(1 + attempt)
 
                 except Exception as e:
                     self.logger.error(f"❌ Exception in guaranteed closure attempt {attempt + 1} ({method_to_try.__name__}) for {symbol}: {e}", exc_info=True)
                     final_result = {'success': False, 'message': f'Exception during closure attempt {attempt + 1}: {e}'}
-                    # Add delay before next attempt
                     time.sleep(2 + attempt)
 
             self.logger.error(f"❌ All {max_attempts} guaranteed position closure attempts failed or could not be verified for {symbol}. Final attempt result: {final_result}")
             return final_result
 
     def _force_close_position(self, symbol: str) -> Dict:
-            """Attempts to close position aggressively with market order, retrying smaller qty."""
-            # (Implementation provided previously is mostly correct, ensure logging and verification call)
             self.logger.warning(f"Attempting FORCE CLOSE for {symbol} using market orders...")
             max_internal_retries = 2
             initial_quantity = 0
             close_side = ''
 
             try:
-                # Get initial quantity from REST for safety
                 position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 if not position_response or position_response.get('retCode') != 0:
                     return {'success': False, 'message': 'Failed to get position info for force close'}
@@ -1460,29 +1337,27 @@ class ExecutionEngine:
                     if order_response and order_response.get('retCode') == 0:
                         order_id = order_response['result']['orderId']
                         self.logger.info(f"✅ Force close market order placed successfully. Order ID: {order_id}")
-                        # Don't rely solely on placement, verify closure
-                        if self._verify_position_closure(symbol, timeout=10): # Use verification
+                        if self._verify_position_closure(symbol, timeout=10):
                             return { 'success': True, 'order_id': order_id, 'method': 'force_close' }
                         else:
                             self.logger.warning(f"Force close order placed for {symbol}, but verification failed. Checking remaining size...")
-                            # Check remaining size via REST again before next attempt
                             remaining_pos = self.client.get_position_info(category="linear", settleCoin="USDT")
                             if remaining_pos and remaining_pos.get('retCode') == 0:
                                 rem_list = remaining_pos['result'].get('list', [])
                                 rem_p = next((p for p in rem_list if p['symbol'] == symbol), None)
                                 if rem_p and float(rem_p.get('size', 0)) > 0:
-                                    quantity_to_close = float(rem_p['size']) # Update qty for next attempt
+                                    quantity_to_close = float(rem_p['size'])
                                     self.logger.info(f"Remaining size: {quantity_to_close}. Retrying force close.")
-                                else: # Position IS closed now
+                                else:
                                     self.logger.info("Position closed after REST check during force close retry.")
                                     return { 'success': True, 'order_id': order_id, 'method': 'force_close_verified_late' }
                             else:
                                 self.logger.error("Could not get remaining position size during force close retry.")
-                                break # Break and return failure if can't get remaining size
+                                break
                     else:
                         error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
                         self.logger.error(f"❌ Force close market order attempt {i + 1} failed: {error_msg}")
-                        time.sleep(1 + i) # Wait longer
+                        time.sleep(1 + i)
 
                 except Exception as e:
                     self.logger.error(f"❌ Exception during force close attempt {i + 1}: {e}")
@@ -1492,13 +1367,11 @@ class ExecutionEngine:
             return {'success': False, 'message': 'Force close failed after all retries'}
 
     def _emergency_position_closure(self, symbol: str) -> Dict:
-            """Try alternative closure methods if force close fails."""
-            # (Implementation provided previously is mostly correct, ensure logging and verification call)
             self.logger.critical(f"🚨 Executing EMERGENCY closure methods for {symbol}...")
             methods = [
-                self._try_reduce_and_close, # Try multiple smaller market orders
-                self._try_multiple_small_orders, # Try multiple small IOC limit orders
-                self._try_different_order_types # Cycle Market/Limit IOC
+                self._try_reduce_and_close,
+                self._try_multiple_small_orders,
+                self._try_different_order_types
             ]
             final_result = {'success': False, 'message': 'All emergency closure methods failed'}
 
@@ -1506,20 +1379,17 @@ class ExecutionEngine:
                 self.logger.info(f"Emergency closure: Trying method '{method.__name__}'...")
                 try:
                     result = method(symbol)
-                    final_result = result # Store last result
-                    # Check verification AFTER the method attempt
+                    final_result = result
                     if self._verify_position_closure(symbol, timeout=10):
                         self.logger.info(f"✅ Emergency closure for {symbol} succeeded and verified using {method.__name__}.")
-                        # Ensure result reflects verified success
                         result['success'] = True
                         return result
                     else:
                         self.logger.warning(f"Emergency method {method.__name__} finished (Reported Success: {result.get('success', False)}), but verification failed. Trying next method...")
-                        # Only continue if the method itself didn't report definite success AND verification failed
-                        if result.get('success'): # If method thought it worked but verify failed, log issue but continue
+                        if result.get('success'):
                             self.logger.error(f"Potential issue: {method.__name__} reported success but position not verified closed.")
 
-                    time.sleep(1) # Small delay between methods
+                    time.sleep(1)
                 except Exception as e:
                     self.logger.error(f"Exception during emergency method {method.__name__}: {e}")
                     final_result = {'success': False, 'message': f'Exception in {method.__name__}: {e}'}
@@ -1714,57 +1584,45 @@ class ExecutionEngine:
             return orderbook['weighted_bid'] * 1.001
 
     def _verify_position_closure(self, symbol: str, timeout: int = 10) -> bool:
-            """Verify position closure, checking WS cache first, then REST with timeout."""
             start_time = time.time()
             self.logger.info(f"Verifying position closure for {symbol} (timeout {timeout}s)...")
 
             while time.time() - start_time < timeout:
                 try:
-                    # 1. Check WebSocket cache
                     with self._state_lock:
                         cached_pos = self.position_cache.get(symbol)
-                        # Check if size is exactly 0 and if the update is reasonably recent
                         if cached_pos and cached_pos.get('size') == 0:
-                            # Use a slightly longer window for verification check than general use
-                            if time.time()*1000 - cached_pos.get('updatedTime', 0) < 20000: # 20 seconds
+                            if time.time()*1000 - cached_pos.get('updatedTime', 0) < 20000:
                                 self.logger.info(f"✅ Verified position closure for {symbol} via WS cache.")
                                 return True
 
-                    # 2. If cache doesn't confirm or is old/missing, check REST API
                     self.logger.debug(f"WS cache doesn't confirm closure for {symbol}, checking REST...")
                     position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                     if position_response and position_response.get('retCode') == 0:
                         positions = position_response['result'].get('list', [])
                         position = next((p for p in positions if p['symbol'] == symbol), None)
 
-                        # Check if position list is empty OR the specific symbol has size 0
                         if not position or float(position.get('size', 0)) == 0:
                             self.logger.info(f"✅ Verified position closure for {symbol} via REST API.")
-                            # Update cache based on REST confirmation
                             with self._state_lock:
                                 if symbol in self.position_cache:
-                                    # Update existing entry
                                     self.position_cache[symbol]['size'] = 0
                                     self.position_cache[symbol]['updatedTime'] = int(position.get('updatedTime', time.time()*1000)) if position else time.time()*1000
-                                # else: # If it wasn't in cache, no need to add a zero entry
                             return True
 
-                    # Wait before next check
-                    time.sleep(1.5) # Check REST less frequently
+                    time.sleep(1.5)
 
                 except Exception as e:
                     self.logger.error(f"❌ Error during position closure verification for {symbol}: {e}")
-                    time.sleep(2) # Longer sleep on error
+                    time.sleep(2)
 
             self.logger.warning(f"❌ Position closure verification timed out for {symbol} after {timeout}s.")
             return False
 
     def validate_order_execution(self, symbol: str, order_id: str, expected_side: str, expected_quantity: float) -> Dict:
-            """Validate order execution, checking WS state first, then confirming via REST."""
             validation_result = {'valid': False, 'reason': '', 'checked_via': 'none'}
             self.logger.debug(f"Validating order execution for {order_id} ({symbol})...")
 
-            # 1. Check internal state (updated by WS)
             order_state = None
             with self._state_lock:
                 order_state = self.open_orders.get(order_id)
@@ -1774,30 +1632,23 @@ class ExecutionEngine:
                 ws_cum_qty = order_state.get('cumExecQty', 0)
                 ws_avg_price = order_state.get('avgPrice', 0)
                 ws_timestamp = order_state.get('updatedTime', 0)
-                is_fresh = time.time()*1000 - ws_timestamp < 30000 # 30s freshness
+                is_fresh = time.time()*1000 - ws_timestamp < 30000
 
-                # If WS shows a final state recently, use it for initial assessment
-                if is_fresh and ws_status in ['Filled', 'PartiallyFilled', 'Cancelled', 'Rejected', 'Expired', 'PartiallyFilledCanceled']:
+                if is_fresh and ws_status in ['Filled', 'Cancelled', 'Rejected', 'Expired', 'PartiallyFilledCanceled']:
                     validation_result['reason'] = f"WS reports final status: {ws_status}"
                     validation_result['checked_via'] = 'ws_state_final'
-                    # Proceed to REST check for full confirmation details
                 elif is_fresh:
                     validation_result['reason'] = f"WS reports active status: {ws_status}"
                     validation_result['checked_via'] = 'ws_state_active'
-                    # Proceed to REST check
                 else:
                     validation_result['reason'] = f"WS state is stale or status is 'New'"
                     validation_result['checked_via'] = 'ws_state_stale'
-                    # Proceed to REST check
             else:
                 validation_result['reason'] = f"Order {order_id} not found in internal tracking (potentially filled/cancelled)."
                 validation_result['checked_via'] = 'ws_state_closed'
-                # Proceed to REST check for definite confirmation
-
-            # 2. Fallback/Confirmation: Check REST API
+                
             try:
                 self.logger.debug(f"Validating order {order_id} via REST API for confirmation...")
-                # Assuming self.client.get_order_status exists and calls /v5/order/history
                 order_status_resp = self.client.get_order_status(symbol, order_id)
 
                 if not order_status_resp or order_status_resp.get('retCode') != 0:
@@ -1810,23 +1661,21 @@ class ExecutionEngine:
 
                 if not order_info:
                     validation_result.update({'valid': False, 'reason': f"{validation_result['reason']}. REST Check: Order not found", 'checked_via': 'rest_not_found'})
-                    # If WS thought it was closed AND REST confirms not found, it's likely validly closed/never existed
                     if validation_result['checked_via'] == 'ws_state_closed':
-                        validation_result['valid'] = True # Assume cancellation/rejection happened correctly
+                        validation_result['valid'] = True
                         validation_result['reason'] = "Order closed/cancelled (confirmed by WS state + REST not found)"
                     return validation_result
 
-                # --- Extract REST Data ---
-                actual_side = order_info.get('side') # 'Buy' or 'Sell'
-                actual_quantity = float(order_info.get('qty', 0)) # Requested quantity
-                order_status = order_info.get('orderStatus') # e.g., 'Filled', 'PartiallyFilled', 'Cancelled'
+                actual_side = order_info.get('side')
+                actual_quantity = float(order_info.get('qty', 0))
+                order_status = order_info.get('orderStatus')
                 avg_price = float(order_info.get('avgPrice', 0))
                 cum_exec_qty = float(order_info.get('cumExecQty', 0))
 
                 validation_result.update({
                     'order_status': order_status,
                     'side_match': actual_side == expected_side,
-                    'quantity_request_match': abs(actual_quantity - expected_quantity) < 0.00001, # Check requested quantity
+                    'quantity_request_match': abs(actual_quantity - expected_quantity) < 0.00001,
                     'partially_filled': order_status == 'PartiallyFilled',
                     'fully_filled': order_status == 'Filled',
                     'executed_qty': cum_exec_qty,
@@ -1834,23 +1683,18 @@ class ExecutionEngine:
                     'checked_via': validation_result['checked_via'] + '+rest_success'
                 })
 
-                # Define 'valid' based on whether it's correctly filled (fully or partially)
                 is_executed_or_partially = order_status in ['Filled', 'PartiallyFilled']
                 validation_result['valid'] = (
                     validation_result['side_match'] and
                     is_executed_or_partially and
-                    cum_exec_qty > 0 # Ensure *some* quantity was actually executed
-                    # We don't check quantity_request_match here, as partial fills are valid executions
+                    cum_exec_qty > 0
                 )
 
-                # Update reason if validation failed based on REST
                 if not validation_result['valid']:
                     mismatches = []
                     if not validation_result['side_match']: mismatches.append("side")
                     if not is_executed_or_partially: mismatches.append("not_executed")
-                    # If partially filled but exec_qty is 0, that's an issue
                     if order_status == 'PartiallyFilled' and cum_exec_qty <= 0 : mismatches.append("partial_zero_exec_qty")
-                    # If filled but exec_qty is 0, that's an issue
                     if order_status == 'Filled' and cum_exec_qty <= 0: mismatches.append("filled_zero_exec_qty")
 
                     validation_result['reason'] = f"REST validation failed: Mismatches={','.join(mismatches)}, Status={order_status}, ExecQty={cum_exec_qty}"
@@ -1866,34 +1710,29 @@ class ExecutionEngine:
                 return validation_result
 
     def reconcile_positions(self, perform_rest_check: bool = True) -> Dict:
-            """Reconcile internal WS position cache with exchange state via REST API."""
             reconciliation = {
                 'timestamp': time.time(),
                 'rest_check_performed': False,
                 'ws_cache_count': 0,
                 'rest_count': 0,
                 'matched': [],
-                'mismatched_details': [], # Differences between WS cache and REST
-                'unexpected_on_rest': [], # Found on REST, not in WS cache
-                'missing_on_rest': [], # Found in WS cache, missing on REST
+                'mismatched_details': [],
+                'unexpected_on_rest': [],
+                'missing_on_rest': [],
                 'errors': []
             }
             rest_fetch_successful = False
             actual_positions_rest = {}
             ws_cache_snapshot = {}
 
-            # --- Get WS Cache State ---
             try:
                 with self._state_lock:
-                    # Take a snapshot for comparison
                     ws_cache_snapshot = {sym: data.copy() for sym, data in self.position_cache.items()}
                 reconciliation['ws_cache_count'] = len(ws_cache_snapshot)
             except Exception as e:
                 self.logger.error(f"Error accessing WS cache for reconciliation: {e}")
                 reconciliation['errors'].append(f'Error accessing WS cache: {e}')
-                # Proceed without WS cache comparison if error occurs
-
-            # --- Get Exchange State via REST ---
+                
             if perform_rest_check:
                 reconciliation['rest_check_performed'] = True
                 try:
@@ -1903,15 +1742,13 @@ class ExecutionEngine:
                         err = actual_positions_response.get('retMsg', 'Unknown') if actual_positions_response else 'No response'
                         reconciliation['errors'].append(f'Failed to get positions via REST: {err}')
                         self.logger.error(f"Reconciliation failed: Could not fetch positions via REST ({err}).")
-                        # Cannot proceed with comparison if REST fails
                         return {'success': False, 'reconciliation': reconciliation}
                     else:
                         rest_fetch_successful = True
-                        # Parse REST response
                         for pos in actual_positions_response['result'].get('list', []):
                             symbol = pos.get('symbol')
                             size = float(pos.get('size', 0))
-                            if symbol: # Store even zero-size positions from REST for comparison
+                            if symbol:
                                 actual_positions_rest[symbol] = {
                                     'size': size, 'side': pos.get('side'),
                                     'avgPrice': float(pos.get('avgPrice', 0)),
@@ -1921,13 +1758,10 @@ class ExecutionEngine:
                         reconciliation['rest_count'] = len(actual_positions_rest)
                         self.logger.info(f"REST reconciliation: Found {len([p for p in actual_positions_rest.values() if p['size'] > 0])} open positions.")
 
-                        # --- Update WS cache with REST data for synchronization ---
                         with self._state_lock:
-                            # Overwrite cache with REST truth, including zero positions found by REST
                             self.position_cache = actual_positions_rest.copy()
-                            # Remove symbols from cache that were NOT in the REST response at all
                             symbols_in_rest = set(actual_positions_rest.keys())
-                            symbols_in_cache = list(self.position_cache.keys()) # Iterate over copy of keys
+                            symbols_in_cache = list(self.position_cache.keys())
                             for sym in symbols_in_cache:
                                 if sym not in symbols_in_rest:
                                     del self.position_cache[sym]
@@ -1938,13 +1772,11 @@ class ExecutionEngine:
                     self.logger.error(f"Exception during REST reconciliation: {e}", exc_info=True)
                     return {'success': False, 'reconciliation': reconciliation}
             else:
-                # If not performing REST check, we can't truly reconcile. Just report cache state.
                 self.logger.info("Skipping REST check in reconcile_positions. Reporting WS cache state only.")
-                reconciliation['matched'] = list(ws_cache_snapshot.keys()) # Assume cache is correct if not checking REST
+                reconciliation['matched'] = list(ws_cache_snapshot.keys())
                 return {'success': True, 'reconciliation': reconciliation}
 
 
-            # --- Compare WS Snapshot vs REST Data ---
             if rest_fetch_successful:
                 all_symbols = set(ws_cache_snapshot.keys()) | set(actual_positions_rest.keys())
 
@@ -1952,23 +1784,17 @@ class ExecutionEngine:
                     ws_pos = ws_cache_snapshot.get(symbol)
                     rest_pos = actual_positions_rest.get(symbol)
 
-                    # Clean up REST position if size is effectively zero
                     if rest_pos and abs(rest_pos['size']) < 1e-9:
-                        rest_pos = None # Treat negligible size as closed
+                        rest_pos = None
 
-                    # Clean up WS position if size is effectively zero
                     if ws_pos and abs(ws_pos['size']) < 1e-9:
                         ws_pos = None
 
 
                     if ws_pos and rest_pos:
-                        # Compare size, side etc. Use tolerance for float comparison.
                         size_diff = abs(ws_pos['size'] - rest_pos['size'])
                         side_match = ws_pos['side'] == rest_pos['side']
-                        # Price comparison is less critical for reconciliation, focus on size/side
-                        # price_diff = abs(ws_pos['avgPrice'] - rest_pos['avgPrice'])
-
-                        # Define mismatch threshold (e.g., 0.01% of size or a tiny absolute value)
+                        
                         mismatch_threshold = max(1e-6, rest_pos['size'] * 0.0001)
 
                         if size_diff > mismatch_threshold or not side_match:
@@ -1981,14 +1807,11 @@ class ExecutionEngine:
                             })
                         else:
                             reconciliation['matched'].append(symbol)
-                    elif ws_pos and not rest_pos: # In WS cache (size > 0), but not in REST (or size is 0)
+                    elif ws_pos and not rest_pos:
                         reconciliation['missing_on_rest'].append({'symbol': symbol, 'ws_state': ws_pos})
-                    elif not ws_pos and rest_pos: # Not in WS cache (or size 0), but found open in REST
+                    elif not ws_pos and rest_pos:
                         reconciliation['unexpected_on_rest'].append({'symbol': symbol, 'rest_state': rest_pos})
-                    # Else: both are None (size 0), which is consistent
-
-
-            # --- Report Results ---
+                    
             mismatched_count = len(reconciliation['mismatched_details'])
             missing_count = len(reconciliation['missing_on_rest'])
             unexpected_count = len(reconciliation['unexpected_on_rest'])
@@ -2000,29 +1823,22 @@ class ExecutionEngine:
                             f"{mismatched_count} mismatched, "
                             f"{missing_count} missing on REST, "
                             f"{unexpected_count} unexpected on REST.")
-                # Trigger further action if needed, e.g., alert, forced sync, emergency stop
                 if mismatched_count > 1 or missing_count > 1 or unexpected_count > 1:
                     self.logger.error("Significant position discrepancies found during reconciliation! Manual review may be needed.")
-                    # self.emergency_protocols.execute_emergency_stop(...) # Potentially trigger emergency
             else:
                 self.logger.info("Position reconciliation successful: Internal cache matches exchange state.")
 
             return {'success': not reconciliation['errors'], 'reconciliation': reconciliation}
 
     def emergency_stop_with_verification(self) -> Dict:
-            """Orchestrates emergency stop: cancel orders, close positions, verify."""
-            # (Implementation provided previously is mostly correct, ensure logging and updated calls)
             self.logger.critical("🚨 EMERGENCY STOP WITH VERIFICATION ACTIVATED!")
             start_time = time.time()
             results = {'success': False, 'message': 'Emergency stop initiated'}
             try:
-                # 1. Cancel All Orders
-                cancel_result = self.cancel_all_orders(settleCoin="USDT") # Uses updated method
+                cancel_result = self.cancel_all_orders(settleCoin="USDT")
                 if not cancel_result or cancel_result.get('retCode') != 0:
                     self.logger.error("Failed to cancel all orders during emergency stop.")
-                    # Continue anyway
-
-                # 2. Identify Open Positions (Use REST for safety)
+                    
                 symbols_to_close = []
                 try:
                     current_positions_response = self.client.get_position_info(category="linear", settleCoin="USDT")
@@ -2043,26 +1859,23 @@ class ExecutionEngine:
 
                 self.logger.info(f"Attempting guaranteed closure for symbols: {symbols_to_close}")
 
-                # 3. Execute Guaranteed Closure for each symbol
                 closure_results = {}
                 failed_closures = []
                 for symbol in set(symbols_to_close):
                     self.logger.info(f"Emergency Closing {symbol}...")
-                    result = self.execute_guaranteed_position_closure(symbol, max_attempts=3) # Uses updated method
+                    result = self.execute_guaranteed_position_closure(symbol, max_attempts=3)
                     closure_results[symbol] = result
                     if not result.get('success'):
                         failed_closures.append(symbol)
                         self.logger.error(f"❌ Guaranteed closure FAILED for {symbol}: {result.get('message')}")
-                    # Verification is now part of guaranteed_closure
                     time.sleep(0.3)
 
-                # 4. Final Verification Loop (Redundant if guaranteed_closure verifies, but safe)
                 verification_results = {}
                 all_verified_closed = True
                 final_check_symbols = set(symbols_to_close)
                 self.logger.info(f"Performing FINAL position verification for: {final_check_symbols}")
                 for symbol in final_check_symbols:
-                    is_closed = self._verify_position_closure(symbol, timeout=20) # Use verification
+                    is_closed = self._verify_position_closure(symbol, timeout=20)
                     verification_results[symbol] = is_closed
                     if not is_closed:
                         self.logger.critical(f"❌ FINAL VERIFICATION FAILED for {symbol} - POSITION MAY REMAIN OPEN!")
@@ -2071,8 +1884,7 @@ class ExecutionEngine:
                         self.logger.info(f"✅ Final verification passed for {symbol}.")
                     time.sleep(0.1)
 
-                # 5. Final Reconciliation
-                final_reconciliation = self.reconcile_positions(perform_rest_check=True) # Force REST check
+                final_reconciliation = self.reconcile_positions(perform_rest_check=True)
 
                 duration = time.time() - start_time
                 results = {
@@ -2096,19 +1908,15 @@ class ExecutionEngine:
                 return {'success': False, 'error': str(e), 'message': 'Exception during emergency stop process.'}
 
     def close_position(self, symbol: str, side: str = None):
-            """Places a market order to close the specified position."""
-            # Side parameter is ignored, closure side is determined by current position
             self.logger.info(f"Attempting to close position for {symbol}...")
             try:
-                # Get current position details reliably via REST before closing
                 position_response = self.client.get_position_info(category="linear", settleCoin="USDT")
                 if not position_response or position_response.get('retCode') != 0:
-                    # Try checking WS cache as a fallback ONLY if REST fails critically
                     with self._state_lock:
                         cached_pos = self.position_cache.get(symbol)
                     if cached_pos and cached_pos['size'] != 0:
                         self.logger.warning("REST failed for get_position_info, using WS cache data for closure (RISKY).")
-                        position = cached_pos # Use cache data cautiously
+                        position = cached_pos
                     else:
                         self.logger.error(f"Failed to get position info for {symbol} to close: {position_response.get('retMsg', 'Unknown') if position_response else 'No response'}")
                         return {'success': False, 'message': 'Failed to get position info'}
@@ -2119,18 +1927,15 @@ class ExecutionEngine:
 
                 if not position or float(position.get('size', 0)) == 0:
                     self.logger.info(f"No open position found for {symbol} to close.")
-                    # Ensure cache reflects this
                     with self._state_lock:
                         if symbol in self.position_cache:
                             self.position_cache[symbol]['size'] = 0
                             self.position_cache[symbol]['updatedTime'] = time.time()*1000
                     return {'success': True, 'message': 'No position found'}
 
-                # Determine close side and quantity from reliable source (REST preferred)
-                # Ensure size is fetched correctly (might be string in REST response)
-                current_side = position['side'] # 'Buy' or 'Sell'
+                current_side = position['side']
                 close_side = 'Buy' if current_side == 'Sell' else 'Sell'
-                quantity = float(position['size']) # Size is always positive
+                quantity = float(position['size'])
 
                 self.logger.info(f"Closing {symbol} position: {quantity} units via {close_side} market order.")
 
@@ -2139,33 +1944,27 @@ class ExecutionEngine:
                     side=close_side,
                     order_type='Market',
                     qty=quantity,
-                    price=None # Not needed for market
-                    # Add reduceOnly=True if supported and desired? Bybit v5 doesn't explicitly list it for Market.
+                    price=None
                 )
 
                 if order_response and order_response.get('retCode') == 0:
                     order_id = order_response['result']['orderId']
                     self.logger.info(f"✅ Position close order placed successfully for {symbol}. Order ID: {order_id}")
 
-                    # --- Update Internal State Optimistically ---
                     with self._state_lock:
-                        # Remove from open orders if tracked (market should fill fast)
                         if order_id in self.open_orders: del self.open_orders[order_id]
 
-                        # Update position cache size to 0
                         if symbol in self.position_cache:
                             self.position_cache[symbol]['size'] = 0
-                            # Update timestamp roughly, WS will give precise update
                             self.position_cache[symbol]['updatedTime'] = time.time()*1000
-                        else: # Add entry if somehow missing
+                        else:
                             self.position_cache[symbol] = {'size': 0, 'updatedTime': time.time()*1000}
-                    # ------------------------------------------
-
+                    
                     return {
                         'success': True,
                         'order_id': order_id,
                         'symbol': symbol,
-                        'side': close_side, # Side of the closing order
+                        'side': close_side,
                         'quantity': quantity
                     }
                 else:
@@ -2178,29 +1977,22 @@ class ExecutionEngine:
                 return {'success': False, 'message': f'Error closing position: {e}'}
         
     def get_trade_history(self, limit: int = 50):
-            """Returns a copy of the recent trade history stored locally."""
-            with self._state_lock: # Protect access if modified elsewhere
-                # Make sure trade_history structure matches what's expected
-                history_copy = self.trade_history[:] # Shallow copy
+            with self._state_lock:
+                history_copy = self.trade_history[:]
             if limit >= len(history_copy):
                 return history_copy
             return history_copy[-limit:]
     
     def get_performance_metrics(self):
-            """Calculates basic performance metrics from local trade history."""
-            # Note: This relies on local history and simple 'success' status.
-            # For accurate PNL-based metrics, querying the database is better.
-            local_history = self.get_trade_history(limit=500) # Use more history for metrics
+            local_history = self.get_trade_history(limit=500)
             if not local_history:
                 self.logger.warning("get_performance_metrics: No local trade history available.")
                 return {}
 
             total_trades = len(local_history)
-            # Count successful placements as 'wins' for this simple metric
             successful_placements = [t for t in local_history if t.get('success', False)]
             win_rate_placeholder = len(successful_placements) / total_trades * 100 if total_trades > 0 else 0
 
-            # Calculate averages only from relevant trades
             confidences = [t.get('confidence', 0) for t in local_history if t.get('confidence') is not None]
             risk_rewards = [t.get('risk_reward_ratio', 0) for t in local_history if t.get('risk_reward_ratio') is not None]
 
@@ -2209,10 +2001,10 @@ class ExecutionEngine:
 
             metrics = {
                 'total_trades': total_trades,
-                'win_rate': win_rate_placeholder, # Placeholder - needs PNL
+                'win_rate': win_rate_placeholder,
                 'avg_confidence': avg_confidence,
                 'avg_risk_reward': avg_risk_reward,
-                'recent_trades': local_history[-10:] # Show last 10 attempts
+                'recent_trades': local_history[-10:]
             }
             self.logger.debug(f"Calculated performance metrics from local history: {metrics}")
             return metrics

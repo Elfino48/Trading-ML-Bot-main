@@ -43,8 +43,40 @@ class TelegramBot:
             '/emergency': self._handle_emergency,
             '/metrics': self._handle_metrics,
             '/reset_errors': self._handle_reset_errors,
-            '/database': self._handle_database
+            '/database': self._handle_database,
+            '/forceretrain': self._handle_forceretrain
         }
+
+    def _handle_forceretrain(self, chat_id: str, args: List[str]):
+        if not self.trading_bot:
+            self.send_message(chat_id, "❌ Bot not connected")
+            return
+        
+        try:
+            # Requires confirmation to run the intensive process
+            if not args or args[0].lower() != 'confirm':
+                self.send_message(
+                    chat_id,
+                    "⚠️ <b>CONFIRM FULL MODEL RETRAINING</b>\n\n"
+                    "This is a resource-intensive task. It will:\n"
+                    "• Rerun training for ALL models.\n"
+                    "• Save new models to disk.\n\n"
+                    "Type <code>/forceretrain confirm</code> to proceed."
+                )
+                return
+
+            if self.trading_bot.trigger_retrain_all_models(force_all=True):
+                self.send_message(
+                    chat_id,
+                    "🧠 <b>RETRAINING STARTED</b>\n\n"
+                    "✅ Full retraining task initiated in the background.\n"
+                    "You will receive logs when training for individual models completes."
+                )
+            else:
+                self.send_message(chat_id, "❌ Failed to start retraining task.")
+
+        except Exception as e:
+            self.send_message(chat_id, f"❌ Error triggering retraining: {e}")
     
     def send_message(self, chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
         try:
@@ -276,6 +308,7 @@ class TelegramBot:
 /metrics - Advanced performance metrics
 /reset_errors - Reset error handler
 /database - Database statistics
+/forceretrain [confirm] - Force retraining of all ML models (intensive)
 
 /help - Show this help message
 
@@ -721,6 +754,7 @@ class TelegramBot:
 /metrics - Advanced performance metrics
 /reset_errors - Reset error handler
 /database - Database statistics
+/forceretrain [confirm] - Force retraining of all ML models (intensive)
 
 <b>Aggressiveness Levels:</b>
 • conservative - Safe, fewer trades (min confidence: 35%)

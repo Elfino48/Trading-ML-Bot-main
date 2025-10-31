@@ -229,10 +229,10 @@ class EnhancedStrategyOrchestrator:
             self.sell_threshold = -15
             self.strong_threshold = 30
             
-        elif self.aggressiveness == "aggressive":
+        if self.aggressiveness == "aggressive":
             self.strategy_weights = {
-                'trend_following': 0.20,
-                'mean_reversion': 0.40,
+                'trend_following': 0.30,  
+                'mean_reversion': 0.30,  
                 'breakout': 0.25,
                 'ml_prediction': 0.15
             }
@@ -1710,8 +1710,13 @@ class EnhancedStrategyOrchestrator:
             optimized_weights = self._integrate_strategy_optimizer(
                 indicators.get('symbol', 'UNKNOWN'), indicators, None
             )
+
+            ml_confidence = ml_result.get('confidence', 0)
             
-            ml_weight_multiplier = 0.5 # Reduce ML weight by 50%
+            if ml_confidence < 0.7:
+                ml_weight_multiplier = 0.5
+            else:
+                ml_weight_multiplier = 1.0 
 
             # Use optimized weights if available, otherwise fallback to aggressiveness-based weights
             if optimized_weights and any(optimized_weights.values()):
@@ -1864,27 +1869,63 @@ class EnhancedStrategyOrchestrator:
         
         return thresholds
 
-    # ENHANCED: Update regime-aware filters with crypto context
     def _apply_regime_aware_filters(self, decision: Dict, indicators: Dict) -> Dict:
-        """Apply regime-aware filters with crypto-specific considerations"""
         try:
             market_regime = indicators.get('market_regime', 'neutral')
             crypto_regime = indicators.get('crypto_regime', 'neutral')
             
-            # Crypto-specific regime adjustments
+            # NEW: Comprehensive Overbought/Oversold Filter
+            rsi_14 = indicators.get('rsi_14', 50)
+            stoch_k = indicators.get('stoch_k', 50)
+            bb_position = indicators.get('bb_position', 0.5)
+            price_vs_high_20 = indicators.get('price_vs_high_20', 1.0)
+            
+            # Overbought conditions for BUY signals
+            if decision['action'] == 'BUY':
+                overbought_signals = 0
+                if rsi_14 > 70: overbought_signals += 2  # Weight RSI more heavily
+                if stoch_k > 80: overbought_signals += 1
+                if bb_position > 0.8: overbought_signals += 1
+                if price_vs_high_20 > 0.98: overbought_signals += 1
+                
+                # Trigger with just 1 strong signal or 2 weak signals
+                if overbought_signals >= 2:
+                    # Much stronger penalty
+                    confidence_reduction = max(0.3, 1.0 - (overbought_signals * 0.25))
+                    decision['confidence'] = decision['confidence'] * confidence_reduction
+                    
+                    # Consider changing action to HOLD in extreme cases
+                    if overbought_signals >= 3 and decision['confidence'] < 40:
+                        decision['action'] = 'HOLD'
+                        decision['execute_reason'] = 'Extreme overbought conditions'
+            
+            # Oversold conditions for SELL signals  
+            elif decision['action'] == 'SELL':
+                oversold_signals = 0
+                if rsi_14 < 30: oversold_signals += 1
+                if stoch_k < 20: oversold_signals += 1
+                if bb_position < 0.2: oversold_signals += 1
+                if price_vs_high_20 < 0.90: oversold_signals += 1  # Well below 20-period high
+                
+                if oversold_signals >= 2:
+                    confidence_reduction = max(0.4, 1.0 - (oversold_signals * 0.2))
+                    decision['confidence'] = decision['confidence'] * confidence_reduction
+                    
+                    weakness_msg = f"Multiple oversold signals ({oversold_signals}/4)"
+                    if 'weaknesses' not in decision['trade_quality']:
+                        decision['trade_quality']['weaknesses'] = []
+                    decision['trade_quality']['weaknesses'].append(weakness_msg)
+
+            # Existing crypto-specific regime adjustments (keep all original code below)
             if crypto_regime == 'crypto_bull':
-                # In crypto bull markets, be more aggressive with buys
                 if decision['action'] == 'BUY':
                     decision['confidence'] = min(95, decision['confidence'] * 1.1)
-                # But more cautious with sells
                 elif decision['action'] == 'SELL':
                     decision['confidence'] = decision['confidence'] * 0.9
                     
             elif crypto_regime == 'crypto_bear':
-                # In crypto bear markets, be more aggressive with sells
                 if decision['action'] == 'SELL':
                     decision['confidence'] = min(95, decision['confidence'] * 1.1)
-                # But more cautious with buys
                 elif decision['action'] == 'BUY':
                     decision['confidence'] = decision['confidence'] * 0.9
 
@@ -1909,8 +1950,8 @@ class EnhancedStrategyOrchestrator:
             if cycle_phase in ['accumulation_phase', 'early_bull']:
                 if decision['action'] == 'BUY':
                     decision['position_size'] = min(
-                        decision.get('portfolio_value', 10000) * 0.3,  # Higher cap in early cycle
-                        decision['position_size'] * 1.2  # Increase size
+                        decision.get('portfolio_value', 10000) * 0.3,
+                        decision['position_size'] * 1.2
                     )
 
             return decision
@@ -2037,29 +2078,51 @@ class EnhancedStrategyOrchestrator:
         return min(0.95, execution_confidence)
 
     def _should_execute_trade(self, decision: Dict) -> Tuple[bool, str]:
-        """Determine if trade should be executed based on quality assessment"""
-        quality = decision.get('trade_quality', {})
-        execution_confidence = quality.get('execution_confidence', 0)
-        active_filters = quality.get('active_filters', [])
+        """Dynamic trend-aware execution criteria"""
         
-        if decision['action'] == 'HOLD':
-            return False, "Hold signal"
+        action = decision['action']
+        market_regime = decision.get('market_regime', 'neutral')
+        trend_score = decision.get('trend_score', 0)
+        ml_confidence = decision['ml_prediction'].get('confidence', 0)
+        ml_prediction = decision['ml_prediction'].get('raw_prediction', 0)
+        composite_score = decision.get('composite_score', 0)
         
-        # Minimum execution confidence
-        if execution_confidence < 0.6:
-            return False, f"Low execution confidence: {execution_confidence:.2f}"
+        # DYNAMIC TREND THRESHOLDS BASED ON MARKET REGIME
+        trend_thresholds = {
+            'bull_trend': {'buy': 15, 'sell': -30},
+            'bear_trend': {'buy': 30, 'sell': -15},
+            'neutral': {'buy': 20, 'sell': -20},
+            'high_volatility': {'buy': 25, 'sell': -25}
+        }
         
-        # Check for critical filters
-        critical_filters = ['VOLUME_FILTER', 'ALIGNMENT_FILTER']
-        if any(filt in active_filters for filt in critical_filters):
-            return False, f"Critical filter active: {active_filters}"
+        regime = market_regime if market_regime in trend_thresholds else 'neutral'
+        buy_threshold = trend_thresholds[regime]['buy']
+        sell_threshold = trend_thresholds[regime]['sell']
         
-        # Position size check
-        min_position_size = 10  # $10 minimum
-        if decision['position_size'] < min_position_size:
-            return False, f"Position size too small: ${decision['position_size']:.2f}"
+        # TREND SCORE VALIDATION
+        if action == 'BUY' and trend_score < buy_threshold:
+            return False, f"Trend score {trend_score} below {regime} buy threshold {buy_threshold}"
         
-        return True, f"Execution approved - confidence: {execution_confidence:.2f}"
+        if action == 'SELL' and trend_score > sell_threshold:
+            return False, f"Trend score {trend_score} above {regime} sell threshold {sell_threshold}"
+        
+        # ML VETO WITH TREND CONTEXT
+        if ml_confidence > 0.75:
+            # Stronger veto if trend is also weak
+            if (action == 'BUY' and ml_prediction <= 0) and trend_score < 25:
+                return False, f"ML veto + weak trend: {trend_score}"
+            
+            if (action == 'SELL' and ml_prediction >= 1) and trend_score > -25:
+                return False, f"ML veto + weak trend: {trend_score}"
+        
+        # [Rest of your standard filters...]
+        if abs(composite_score) < 15:
+            return False, f"Composite score too weak: {composite_score}"
+        
+        if decision['confidence'] < 40:
+            return False, f"Confidence too low: {decision['confidence']}%"
+        
+        return True, "Execution approved"
 
     def _trend_following_strategy(self, indicators: Dict) -> float:
             try:
@@ -2136,14 +2199,17 @@ class EnhancedStrategyOrchestrator:
             rsi_14 = indicators.get('rsi_14', 50)
             bb_position = indicators.get('bb_position', 0.5)
             
-            if rsi_14 < 30:
-                score += 30
-                if rsi_14 < 20:
-                    score += 10
+            # Proper cascading logic
+            if rsi_14 > 75:
+                score -= 60  # Extreme overbought
             elif rsi_14 > 70:
-                score -= 30
-                if rsi_14 > 80:
-                    score -= 10
+                score -= 40  # Overbought
+            elif rsi_14 > 65:
+                score -= 15  # Warning zone
+            elif rsi_14 < 25:
+                score += 40  # Extreme oversold  
+            elif rsi_14 < 30:
+                score += 30  # Oversold
                     
             if bb_position < 0.2:
                 score += 25
@@ -2170,17 +2236,10 @@ class EnhancedStrategyOrchestrator:
     def _breakout_strategy(self, indicators: Dict, mtf_signals: Dict) -> float:
             try:
                 score = 0
-                # --- Add symbol retrieval here ---
-                # Assuming 'symbol' might be available directly in indicators now
-                # If not, it needs to be added during indicator calculation or passed separately
                 symbol = indicators.get('symbol', 'UNKNOWN')
-                # --- End symbol retrieval ---
 
-                # Ensure indicators are valid numbers
                 resistance = float(indicators.get('resistance', 0))
                 support = float(indicators.get('support', 0))
-                # Use analysis_price if available, otherwise fallback
-                # Let's use the actual close price for consistency with how indicators were likely calculated
                 current_price = float(indicators.get('close', indicators.get('bb_middle', indicators.get('ema_8', 0)))) # Use actual close if available
                 rsi_14 = float(indicators.get('rsi_14', 50))
                 volume_ratio = float(indicators.get('volume_ratio', 1))
@@ -2194,14 +2253,29 @@ class EnhancedStrategyOrchestrator:
                 support_distance = (current_price - support) / current_price if current_price > 0 else 0
                 sr_score_change = 0
 
-                # Resistance Check Branch
+                # Get additional indicators for overbought detection
+                stoch_k = float(indicators.get('stoch_k', 50))
+
+                # ENHANCED: Resistance Check with Overbought Awareness
                 res_cond1 = resistance > 0
                 res_cond2 = 0 < resistance_distance < 0.015
-                res_cond3 = rsi_14 > 55
-                self.logger.debug(f"[{symbol}] Res Check Values: res_gt_0={res_cond1}, dist_ok={res_cond2} (dist={resistance_distance:.6f}), rsi_ok={res_cond3} (rsi={rsi_14:.2f})")
-                if res_cond1 and res_cond2 and res_cond3:
-                    sr_score_change = 25
-                    self.logger.debug(f"[{symbol}] Breakout S/R Check: PASSED +{sr_score_change} (Near Resistance)")
+
+                self.logger.debug(f"[{symbol}] Res Check Values: res_gt_0={res_cond1}, dist_ok={res_cond2} (dist={resistance_distance:.6f}), rsi={rsi_14:.2f}, stoch_k={stoch_k:.2f}")
+
+                if res_cond1 and res_cond2:
+                    if (rsi_14 > 65 and stoch_k > 80) or rsi_14 > 75:
+                        sr_score_change = -40  # Strong penalty
+                        self.logger.debug(f"[{symbol}] Breakout S/R Check: STRONG PENALTY {sr_score_change} (Severely Overbought Near Resistance)")
+                    elif rsi_14 > 60 or stoch_k > 75:
+                        self.logger.debug(f"[{symbol}] Breakout S/R Check: PENALIZED {sr_score_change} (Overbought Near Resistance)")
+                        sr_score_change = -25  # Moderate penalty  
+                    elif rsi_14 > 55:
+                        self.logger.debug(f"[{symbol}] Breakout S/R Check: CAUTIOUS +{sr_score_change} (Near Resistance)")
+                        sr_score_change = -10  # Mild penalty
+                    else:
+                        sr_score_change = 25   # Only reward if NOT overbought
+                        self.logger.debug(f"[{symbol}] Breakout S/R Check: PASSED +{sr_score_change} (Near Resistance)")
+
                 else:
                     # Support Check Branch (only if resistance check failed)
                     sup_cond1 = support > 0
@@ -2315,24 +2389,30 @@ class EnhancedStrategyOrchestrator:
 
             confidence_boost = min(ml_confidence * 25 * confidence_boost_factor, 20)
 
-            if composite_score >= buy_threshold:
+            if composite_score >= self.buy_threshold:
                 action = 'BUY'
                 base_confidence = min(composite_score, 70)
-            elif composite_score <= sell_threshold:
-                action = 'SELL'
+            elif composite_score <= self.sell_threshold:
+                action = 'SELL' 
                 base_confidence = min(abs(composite_score), 70)
             else:
                 action = 'HOLD'
                 base_confidence = 0
 
-            confidence = min(85, base_confidence + confidence_boost)
-
-            if abs(composite_score) >= strong_threshold:
-                confidence = min(95, confidence * strong_signal_boost)
-
-            if ml_confidence > 0.8 and action != 'HOLD':
-                confidence = min(95, confidence * 1.1)
-
+            # ML confidence adjustment - FIXED
+            ml_confidence = ml_result.get('confidence', 0)
+            ml_prediction = ml_result.get('raw_prediction', 0)
+            
+            # Only boost if ML agrees with action
+            if (action == 'BUY' and ml_prediction in [1, 2]) or \
+            (action == 'SELL' and ml_prediction in [-1, -2]):
+                confidence_boost = min(ml_confidence * 25 * confidence_boost_factor, 20)
+            else:
+                # Reduce confidence if ML disagrees
+                confidence_boost = -min(ml_confidence * 15 * confidence_boost_factor, 15)
+            
+            confidence = max(0, min(85, base_confidence + confidence_boost))
+            
             return action, confidence
 
         except Exception as e:

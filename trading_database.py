@@ -419,7 +419,7 @@ class TradingDatabase:
 
             db_timestamp = datetime.now().isoformat()
             training_dt = metrics.get('training_date', datetime.now())
-            db_training_date = training_dt.strftime('%Y-%m-%d') if isinstance(training_dt, (datetime, pd.Timestamp)) else datetime.now().strftime('%Y-%m-%d')
+            db_training_date = training_dt.isoformat() if isinstance(training_dt, (datetime, pd.Timestamp)) else datetime.now().isoformat()
 
             values_tuple = (
                 db_timestamp,
@@ -1049,18 +1049,22 @@ class TradingDatabase:
 
     def get_open_stale_trades_by_symbol(self) -> Dict[str, List[Dict]]:
         """
-        Gets all trades from the DB where exit_price IS NULL,
+        Gets all trades from the DB where exit_price IS NULL and haven't been updated recently,
         grouped by symbol, and sorted by timestamp (FIFO).
         """
         stale_trades_map = {}
         try:
+            # Only consider trades older than 5 minutes as stale
+            stale_threshold = (datetime.now() - timedelta(minutes=5)).isoformat()
+            
             query = """
                 SELECT * FROM trades 
                 WHERE exit_price IS NULL 
-                  AND success = 'True'
+                AND success = 'True'
+                AND timestamp < ?
                 ORDER BY symbol, timestamp ASC
             """
-            self.cursor.execute(query)
+            self.cursor.execute(query, (stale_threshold,))
             rows = self.cursor.fetchall()
             
             for row in rows:
@@ -1072,7 +1076,7 @@ class TradingDatabase:
                 
             return stale_trades_map
         except Exception as e:
-            self.logger.error(f"Error getting all stale trades: {e}", exc_info=True)
+            self.logger.error(f"Error getting stale trades: {e}", exc_info=True)
             return {}
 
     def update_trade_exit_by_id(self, trade_id: int, exit_price: float, pnl_usdt: float, pnl_percent: float, exit_time_iso: str, exit_reason: str) -> bool:

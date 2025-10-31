@@ -160,7 +160,7 @@ def load_trade_stats(_db):
     closed_trades = trades_df[trades_df['pnl_percent'].notna()].copy()
     
     if closed_trades.empty:
-        return 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         
     # Ensure pnl_usdt is numeric for profit factor calculation
     closed_trades['pnl_usdt'] = pd.to_numeric(closed_trades['pnl_usdt'], errors='coerce').fillna(0)
@@ -184,9 +184,16 @@ def load_trade_stats(_db):
     best_trade_pnl = closed_trades['pnl_percent'].max() if not closed_trades.empty else 0.0
     worst_trade_pnl = closed_trades['pnl_percent'].min() if not closed_trades.empty else 0.0
     
+    # 3. Average Profit / Average Loss (in USD)
+    avg_profit = gross_profit / wins if wins > 0 else 0.0
+    avg_loss = gross_loss / losses if losses > 0 else 0.0
+
+    # 4. Total Net PnL in USD
+    net_pnl_usd = gross_profit - gross_loss
+    
     # --- END ADDED CALCULATIONS ---
     
-    return wins, losses, win_rate, avg_pnl, profit_factor, best_trade_pnl, worst_trade_pnl
+    return wins, losses, win_rate, avg_pnl, profit_factor, best_trade_pnl, worst_trade_pnl, avg_profit, avg_loss, net_pnl_usd
 
 @st.cache_data(ttl=10)
 def load_ml_history(_db, symbol: str = None):
@@ -195,7 +202,7 @@ def load_ml_history(_db, symbol: str = None):
         return pd.DataFrame(columns=['training_date', 'accuracy', 'rf_accuracy', 'gb_accuracy', 'symbol'])
         
     df = pd.DataFrame(df_list)
-    df['training_date'] = pd.to_datetime(df['training_date'])
+    df['training_date'] = pd.to_datetime(df['training_date'], format='mixed')
     df = df.sort_values('training_date')
     df = df.set_index('training_date')
     return df
@@ -431,7 +438,7 @@ def display_performance_stats(db):
     """Enhanced performance statistics with better visuals"""
     st.markdown("### 📊 Trading Performance Analytics")
     
-    wins, losses, win_rate, avg_pnl, profit_factor, best_trade, worst_trade = load_trade_stats(db)
+    wins, losses, win_rate, avg_pnl, profit_factor, best_trade, worst_trade, avg_profit, avg_loss, net_pnl_usd = load_trade_stats(db)
     total_trades = wins + losses
     
     with st.container():
@@ -471,11 +478,81 @@ def display_performance_stats(db):
             with col5:
                 st.metric("Total Trades", f"{total_trades}")
             with col6:
-                st.metric("Profit Factor", f"{profit_factor:.2f}")
+                st.metric("Profit Factor", f"{profit_factor:.4f}")
             with col7:
-                st.metric("Best Trade", f"{best_trade:+.2f}%")
+                st.metric("Avg Profit", f"${avg_profit:,.4f}")
             with col8:
+                st.metric("Avg Loss", f"${avg_loss:,.4f}")
+
+            st.markdown("---")
+            col9, col10, col11, col12 = st.columns(4)
+
+            with col9:
+                st.metric("Total Net PnL (USD)", f"${net_pnl_usd:,.2f}")
+            with col10:
+                # Add Risk/Reward Ratio based on average P/L
+                risk_reward = avg_profit / avg_loss if avg_loss > 0 else 0.0
+                st.metric("R/R Ratio (Avg)", f"{risk_reward:.4f}:1")
+            with col11:
+                st.metric("Best Trade", f"{best_trade:+.2f}%")
+            with col12:
                 st.metric("Worst Trade", f"{worst_trade:+.2f}%")
+
+def display_pnl_breakdown(db):
+    st.markdown("### 💰 Closed Trade PnL Breakdown (USD)")
+    
+    trades_df_all = load_all_trades(db)
+    # Filter for trades that are closed (have pnl_percent, which implies pnl_usdt is ready)
+    closed_trades = trades_df_all[(trades_df_all['pnl_percent'].notna())].copy()
+    
+    if closed_trades.empty:
+        st.info("No closed trades found to display breakdown.")
+        return
+
+    # Ensure pnl_usdt is float and fill NaNs
+    closed_trades['pnl_usdt'] = pd.to_numeric(closed_trades['pnl_usdt'], errors='coerce').fillna(0)
+
+    # Separate winning and non-winning trades
+    winning_trades = closed_trades[closed_trades['pnl_usdt'] > 0].sort_values('timestamp', ascending=True)
+    losing_trades = closed_trades[closed_trades['pnl_usdt'] <= 0].sort_values('timestamp', ascending=True)
+
+    # Use a two-column layout
+    col_win, col_loss = st.columns(2)
+
+    # --- Winning Trades (Left: Total Win - GREEN) ---
+    with col_win:
+        total_gross_profit = winning_trades['pnl_usdt'].sum()
+        st.markdown(f"#### Total Win: <span style='color: #4CC9F0;'>${total_gross_profit:,.2f}</span>", unsafe_allow_html=True)
+        
+        if winning_trades.empty:
+            st.markdown("No winning trades.")
+        else:
+            list_output = []
+            for i, (_, trade) in enumerate(winning_trades.iterrows()):
+                pnl_str = f"+{trade['pnl_usdt']:,.2f}"
+                # Use simple HTML/Markdown list format for rendering
+                list_output.append(f"<div>#{i+1} <span style='color: #4CC9F0;'>${pnl_str}</span></div>")
+            
+            # Using st.markdown to render the HTML list
+            st.markdown('\n'.join(list_output), unsafe_allow_html=True)
+
+
+    # --- Not Profitable Trades (Right: Total Loss - RED/Neutral) ---
+    with col_loss:
+        total_gross_loss = losing_trades['pnl_usdt'].sum()
+        loss_color = "#F72585" if total_gross_loss < 0 else "#8898aa"
+        st.markdown(f"#### Total Loss: <span style='color: {loss_color};'>${total_gross_loss:,.2f}</span>", unsafe_allow_html=True)
+        
+        if losing_trades.empty:
+            st.markdown("No losing trades.")
+        else:
+            list_output = []
+            for i, (_, trade) in enumerate(losing_trades.iterrows()):
+                pnl_str = f"{trade['pnl_usdt']:,.2f}"
+                # Use simple HTML/Markdown list format for rendering
+                list_output.append(f"<div>#{i+1} <span style='color: #F72585;'>${pnl_str}</span></div>") 
+            
+            st.markdown('\n'.join(list_output), unsafe_allow_html=True)
 
 def display_ml_insights(db):
     """Enhanced ML model performance display"""
@@ -786,7 +863,7 @@ def main():
         return
 
     # Main dashboard layout
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Live Overview", "💰 Positions", "🧠 AI Models", "📋 Trade History"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Live Overview", "💰 Positions", "🧠 AI Models", "📋 Trade History", "💰 Total PnL's"])
     
     with tab1:
         display_pnl_chart(db)
@@ -800,6 +877,9 @@ def main():
         
     with tab4:
         display_trade_intelligence(db)
+
+    with tab5:
+        display_pnl_breakdown(db)
 
     # Footer
     st.markdown("---")

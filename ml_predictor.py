@@ -841,6 +841,10 @@ class MLPredictor:
             if features.empty:
                 return self.fallback_prediction_strategy(symbol, df)
             
+            # === FIX: Initialize variables first ===
+            selected_features = []
+            features_selected = features
+            
             # Apply feature selection
             selected_features = self.feature_importance.get(symbol, {}).get('selected_features', [])
             if selected_features:
@@ -853,8 +857,15 @@ class MLPredictor:
                 else:
                     features_selected = features[selected_features]
             else:
+                # If no selected features available, use all features
                 features_selected = features
+                selected_features = features.columns.tolist()
             
+            if not self.validate_feature_consistency(symbol, features):
+                self.logger.warning(f"Feature consistency check failed for {symbol}, using fallback")
+                return self.fallback_prediction_strategy(symbol, df)
+
+            # === FIX: Ensure features_selected is defined for ensemble ===
             drift_result = self.detect_feature_drift(symbol, features_selected)
                 
             scaled_features = self.scalers[symbol].transform(features_selected)
@@ -877,6 +888,7 @@ class MLPredictor:
             ensemble_used = False
             if symbol in self.previous_models:
                 try:
+                    # === FIX: Use the already defined features_selected ===
                     previous_scaled_features = self.previous_scalers[symbol].transform(features_selected)
                     previous_rf_pred = self.previous_models[symbol]['rf'].predict(previous_scaled_features)[0]
                     previous_gb_pred = self.previous_models[symbol]['gb'].predict(previous_scaled_features)[0]
@@ -893,9 +905,9 @@ class MLPredictor:
                     
                     # Blend confidences
                     rf_confidence = (rf_confidence_calibrated * self.ensemble_weight_current + 
-                                   previous_rf_confidence * self.ensemble_weight_previous)
+                                previous_rf_confidence * self.ensemble_weight_previous)
                     gb_confidence = (gb_confidence_calibrated * self.ensemble_weight_current + 
-                                   previous_gb_confidence * self.ensemble_weight_previous)
+                                previous_gb_confidence * self.ensemble_weight_previous)
                     
                     ensemble_used = True
                 except Exception as e:
@@ -1272,10 +1284,15 @@ class MLPredictor:
     # They remain largely the same but now work with enhanced targets
 
     def _select_features(self, X_train: pd.DataFrame, y_train: pd.Series, symbol: str) -> Tuple[pd.DataFrame, List[str]]:
-        """Feature selection implementation"""
+        """Feature selection implementation with better error handling"""
         try:
             if len(X_train.columns) <= self.max_features:
-                return X_train, X_train.columns.tolist()
+                selected_features = X_train.columns.tolist()
+                print(f"🔍 Feature selection for {symbol}: Using all {len(selected_features)} features")
+                return X_train, selected_features
+            
+            # === FIX: Ensure consistent feature naming ===
+            original_features = X_train.columns.tolist()
             
             if self.feature_selection_method == 'importance':
                 rf_temp = RandomForestClassifier(**self.rf_params)
@@ -1309,6 +1326,7 @@ class MLPredictor:
                 X_selected = X_train[selected_features]
                 
             else:
+                # Default: remove highly correlated features
                 corr_matrix = X_train.corr().abs()
                 upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
                 to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
@@ -1322,14 +1340,39 @@ class MLPredictor:
             
             self.feature_importance[symbol]['selected_features'] = selected_features
             self.feature_importance[symbol]['original_feature_count'] = len(X_train.columns)
+            self.feature_importance[symbol]['all_available_features'] = original_features
             
             return X_selected, selected_features
             
         except Exception as e:
             print(f"⚠️ Feature selection failed for {symbol}: {e}")
+            # Fallback: use features with highest variance
             variances = X_train.var().sort_values(ascending=False)
             selected_features = variances.head(self.max_features).index.tolist()
+            
+            if symbol not in self.feature_importance:
+                self.feature_importance[symbol] = {}
+            self.feature_importance[symbol]['selected_features'] = selected_features
+            self.feature_importance[symbol]['selection_failed'] = True
+            
             return X_train[selected_features], selected_features
+
+    def validate_feature_consistency(self, symbol: str, current_features: pd.DataFrame) -> bool:
+        """Validate that current features match training features"""
+        if symbol not in self.feature_importance:
+            return False
+            
+        selected_features = self.feature_importance[symbol].get('selected_features', [])
+        if not selected_features:
+            return False
+            
+        # Check if all selected features are present in current data
+        missing_features = set(selected_features) - set(current_features.columns)
+        if missing_features:
+            self.logger.warning(f"Feature mismatch for {symbol}: Missing {len(missing_features)} features")
+            return False
+            
+        return True
 
     def _apply_pca(self, X_train: pd.DataFrame, X_test: pd.DataFrame = None) -> Tuple[np.ndarray, np.ndarray]:
         try:
@@ -1476,12 +1519,18 @@ class MLPredictor:
                 
             scaler = self.scalers[symbol]
             
+            # === FIX: Handle feature dimension mismatch ===
+            expected_features = getattr(scaler, 'n_features_in_', None)
+            if expected_features is not None and current_features.shape[1] != expected_features:
+                return {
+                    'drift_detected': True, 
+                    'reason': f'Feature dimension mismatch: {current_features.shape[1]} vs {expected_features}',
+                    'feature_mismatch': True
+                }
+            
             if len(current_features) == 1:
                 current_scaled = scaler.transform(current_features)
             else:
-                expected_features = getattr(scaler, 'n_features_in_', current_features.shape[1])
-                if current_features.shape[1] != expected_features:
-                    return {'drift_detected': False, 'reason': f'Feature dimension mismatch: {current_features.shape[1]} vs {expected_features}'}
                 current_scaled = scaler.transform(current_features)
             
             detector = self.feature_drift_detector[symbol]
@@ -1496,14 +1545,15 @@ class MLPredictor:
                 'drift_detected': drift_detected,
                 'drift_ratio': drift_ratio,
                 'drift_scores': drift_scores.tolist(),
-                'threshold_violations': np.sum(drift_scores < 0)
+                'threshold_violations': np.sum(drift_scores < 0),
+                'feature_mismatch': False
             }
             
             return result
             
         except Exception as e:
             self.logger.error(f"Error detecting feature drift for {symbol}: {e}")
-            return {'drift_detected': False, 'reason': str(e)}
+            return {'drift_detected': False, 'reason': str(e), 'feature_mismatch': True}
 
     def monitor_prediction_quality(self, symbol: str, prediction: int, actual: int, timestamp: datetime):
         try:

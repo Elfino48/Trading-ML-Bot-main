@@ -57,32 +57,29 @@ class StrategyOptimizer:
         print("🎯 Strategy Optimizer initialized")
     
     def optimize_weights(self, market_regime: str, volatility: float, 
-                        recent_performance: Dict, aggressiveness: str) -> Dict[str, float]:
+                        recent_performance: Dict, aggressiveness: str,
+                        regime_confidence: float = 0.5) -> Dict[str, float]:
         """
-        Optimize strategy weights based on current market conditions and performance
-        
-        Args:
-            market_regime: Current market regime
-            volatility: Current market volatility
-            recent_performance: Recent trading performance
-            aggressiveness: Trading aggressiveness level
-            
-        Returns:
-            Optimized strategy weights
+        Enhanced optimization with regime conflict prevention
         """
         # Get base weights for current regime
         base_weights = self._get_base_weights(market_regime, volatility)
         
+        # NEW: Apply regime-based protection
+        if regime_confidence > 0.7:
+            base_weights = self._apply_regime_protection(base_weights, market_regime, regime_confidence)
+        
         # Adjust based on recent performance
         performance_weights = self._adjust_for_performance(base_weights, recent_performance)
         
-        # Adjust for aggressiveness
+        # Adjust for aggressiveness (using corrected factors)
         final_weights = self._adjust_for_aggressiveness(performance_weights, aggressiveness)
         
         # Store optimization record
         optimization_record = {
             'timestamp': datetime.now(),
             'market_regime': market_regime,
+            'regime_confidence': regime_confidence,
             'volatility': volatility,
             'aggressiveness': aggressiveness,
             'weights': final_weights.copy(),
@@ -91,9 +88,43 @@ class StrategyOptimizer:
         self.optimization_history.append(optimization_record)
         
         self.current_weights = final_weights
-        self.logger.info(f"Strategy weights optimized: {final_weights}")
+        self.logger.info(f"Strategy weights optimized with regime protection: {final_weights}")
         
         return final_weights
+
+    def _apply_regime_protection(self, weights: Dict[str, float], 
+                            market_regime: str, confidence: float) -> Dict[str, float]:
+        """
+        Prevent dangerous counter-trend allocations in strong regimes
+        """
+        protected_weights = weights.copy()
+        
+        if market_regime == 'bull_trend' and confidence > 0.7:
+            # In strong bull markets, cap mean reversion weight
+            max_mr_weight = 0.25
+            if protected_weights.get('mean_reversion', 0) > max_mr_weight:
+                excess = protected_weights['mean_reversion'] - max_mr_weight
+                protected_weights['mean_reversion'] = max_mr_weight
+                # Reallocate excess to trend following
+                protected_weights['trend_following'] += excess * 0.8
+                protected_weights['breakout'] += excess * 0.2
+        
+        elif market_regime == 'bear_trend' and confidence > 0.7:
+            # In strong bear markets, cap mean reversion weight
+            max_mr_weight = 0.30
+            if protected_weights.get('mean_reversion', 0) > max_mr_weight:
+                excess = protected_weights['mean_reversion'] - max_mr_weight
+                protected_weights['mean_reversion'] = max_mr_weight
+                # Reallocate excess to trend following
+                protected_weights['trend_following'] += excess * 0.7
+                protected_weights['breakout'] += excess * 0.3
+        
+        # Normalize
+        total = sum(protected_weights.values())
+        if total > 0:
+            protected_weights = {k: v/total for k, v in protected_weights.items()}
+        
+        return protected_weights
     
     def _get_base_weights(self, market_regime: str, volatility: float) -> Dict[str, float]:
         """
@@ -152,36 +183,38 @@ class StrategyOptimizer:
         return adjusted_weights
     
     def _adjust_for_aggressiveness(self, weights: Dict[str, float], 
-                                  aggressiveness: str) -> Dict[str, float]:
+                                aggressiveness: str) -> Dict[str, float]:
         """
-        Adjust weights based on trading aggressiveness
+        CORRECTED: Adjust weights based on trading aggressiveness
+        Aggressive should mean MORE trend following, not more counter-trend gambling
         """
         adjusted_weights = weights.copy()
         
+        # FIXED: Aggressive means capitalize on trends, not fight them
         aggressiveness_factors = {
             "conservative": {
-                'trend_following': 1.1,    # More trend following
-                'mean_reversion': 0.9,     # Less mean reversion
-                'breakout': 0.8,           # Less breakout
-                'ml_prediction': 1.0       # Neutral on ML
+                'trend_following': 1.0,    # Standard trend following
+                'mean_reversion': 1.0,     # Standard mean reversion
+                'breakout': 1.0,           
+                'ml_prediction': 1.0       
             },
             "moderate": {
-                'trend_following': 1.0,
-                'mean_reversion': 1.0,
+                'trend_following': 1.1,    # Slightly more trend following
+                'mean_reversion': 0.9,     # Slightly less mean reversion
                 'breakout': 1.0,
                 'ml_prediction': 1.0
             },
             "aggressive": {
-                'trend_following': 0.9,    # Less trend following
-                'mean_reversion': 1.1,     # More mean reversion
-                'breakout': 1.2,           # More breakout
-                'ml_prediction': 0.9       # Slightly less ML
+                'trend_following': 1.2,    # MORE trend following (was 0.9)
+                'mean_reversion': 0.8,     # LESS mean reversion (was 1.1)
+                'breakout': 1.1,           # Slightly more breakout
+                'ml_prediction': 1.0       # Neutral on ML
             },
             "high": {
-                'trend_following': 0.8,    # Much less trend following
-                'mean_reversion': 1.2,     # Much more mean reversion
-                'breakout': 1.3,           # Much more breakout
-                'ml_prediction': 0.7       # Less ML
+                'trend_following': 1.3,    # MUCH MORE trend following (was 0.8)
+                'mean_reversion': 0.7,     # MUCH LESS mean reversion (was 1.2)
+                'breakout': 1.2,           # More breakout
+                'ml_prediction': 0.9       # Slightly less ML
             }
         }
         
@@ -267,26 +300,33 @@ class StrategyOptimizer:
     
     def _calculate_performance_factor(self, performance: Dict) -> float:
         """
-        Calculate performance adjustment factor for a strategy
+        Enhanced performance factor with regime awareness
+        Don't reward counter-trend strategies that got lucky
         """
         if performance['trade_count'] < 3:
             return 1.0  # Not enough data
         
         win_rate = performance['win_rate']
         avg_pnl = performance['avg_pnl']
-        success_rate = performance['success_rate']
         
-        # Calculate composite performance score
+        # Calculate base performance score
         performance_score = (
-            (win_rate / 100) * 0.4 +          # 40% weight to win rate
-            (max(0, avg_pnl) / 5) * 0.4 +     # 40% weight to average PnL (capped at 5%)
-            (success_rate / 100) * 0.2        # 20% weight to success rate
+            (win_rate / 100) * 0.4 +          
+            (max(0, avg_pnl) / 5) * 0.4 +     
+            (performance.get('success_rate', 50) / 100) * 0.2
         )
         
-        # Convert to adjustment factor (0.8 to 1.2 range)
-        adjustment_factor = 0.8 + (performance_score * 0.4)
+        # NEW: Penalize high-risk strategies that might have gotten lucky
+        risk_adjustment = 1.0
+        if performance.get('avg_holding_period', 0) < 1.0:  # Very short trades
+            risk_adjustment *= 0.9  # Penalize scalping
+        if performance.get('max_drawdown', 0) > 10:  # High drawdown
+            risk_adjustment *= 0.8  # Penalize high risk
         
-        return max(0.5, min(2.0, adjustment_factor))  # Clamp between 0.5 and 2.0
+        # Convert to adjustment factor (0.7 to 1.3 range)
+        adjustment_factor = 0.7 + (performance_score * 0.6 * risk_adjustment)
+        
+        return max(0.5, min(1.5, adjustment_factor))  # Tighter clamp
     
     def analyze_market_regimes(self, symbol: str, historical_data: pd.DataFrame) -> Dict:
         """
