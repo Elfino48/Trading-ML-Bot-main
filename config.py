@@ -25,7 +25,7 @@ TELEGRAM_CONFIG = {
 DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
 
 # Trading Parameters
-SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
+SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT,DOGEUSDT").split(",")
 TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "15")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 

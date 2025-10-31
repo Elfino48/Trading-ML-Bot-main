@@ -276,7 +276,7 @@ class EmergencyProtocols:
     def _cancel_all_orders(self) -> Dict:
         """Cancel all pending orders"""
         try:
-            result = self.execution_engine.cancel_all_orders()
+            result = self.execution_engine.cancel_all_orders(settleCoin="USDT")
             return {
                 'procedure': 'CANCEL_ALL_ORDERS',
                 'success': True,

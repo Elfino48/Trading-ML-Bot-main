@@ -672,11 +672,18 @@ class BybitClient:
         # Increment reconnect attempts for exponential backoff
         self._ws_reconnect_attempts[stream_type] = self._ws_reconnect_attempts.get(stream_type, 0) + 1
         
-        # Log differently based on error type for clarity
-        if "10054" in str(error) or "remote host" in str(error).lower():
-            logger.warning(f"WebSocket {stream_type} connection lost (network issue): {error}")
+        error_str = str(error).lower()
+        
+        # Check if this is a benign, ignorable network error
+        is_ignorable_error = "10054" in error_str or \
+                             "remote host" in error_str or \
+                             "connection lost" in error_str or \
+                             "forcibly closed" in error_str
+
+        if is_ignorable_error:
+            logger.warning(f"WebSocket {stream_type} connection lost (Ignorable network issue): {error}")
         else:
-            logger.error(f"WebSocket {stream_type} error: {error}")
+            logger.error(f"WebSocket {stream_type} error (Non-network): {error}")
 
         # Mark as disconnected
         if stream_type == "public":
@@ -684,9 +691,12 @@ class BybitClient:
         else:
             self.ws_private_connected = False
 
-        # Notify error handler but don't retry immediately - let reconnection loop handle it
-        if self.error_handler:
+        # Notify error handler ONLY IF it's NOT an ignorable network error
+        if not is_ignorable_error and self.error_handler:
+            logger.error(f"Escalating non-network WS error to ErrorHandler: {error}")
             self.error_handler.handle_api_error(error, f"ws_{stream_type}_error")
+        elif is_ignorable_error:
+            logger.info(f"Ignoring benign WS disconnect for {stream_type}. Reconnection loop will handle.")
 
 
     def _ws_on_close(self, ws_app, close_status_code, close_msg, stream_type: str):
@@ -907,3 +917,16 @@ class BybitClient:
             connected = self.ws_private_connected
             
         return connected and last_message_ago <= max_silence
+    
+    def get_closed_pnl_history(self, category: str = "linear", start_time_ms: int = None, limit: int = 50) -> Optional[Dict]:
+        """
+        Fetches closed PnL records (closed positions) from Bybit.
+        """
+        params = {
+            "category": category,
+            "limit": limit
+        }
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        
+        return self._request("GET", "/v5/position/closed-pnl", params)

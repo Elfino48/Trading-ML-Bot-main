@@ -1,5 +1,5 @@
 import time
-from typing import List
+from typing import Dict, List
 import pandas as pd
 import threading
 from bybit_client import BybitClient
@@ -60,8 +60,18 @@ class AdvancedTradingBot:
             self.client.set_error_handler(self.error_handler)
             self.data_engine.set_error_handler(self.error_handler)
             self.risk_manager.set_error_handler(self.error_handler)
-            self.risk_manager.set_database(self.database)
             self.strategy_orchestrator.set_error_handler(self.error_handler)
+            
+            # --- Set Database and Central WS Callback ---
+            self.risk_manager.set_database(self.database)
+            self.strategy_orchestrator.set_database(self.database)
+            self.execution_engine.set_emergency_protocols(self.emergency_protocols)
+            
+            # --- set_main_bot removed ---
+            
+            # Set the new central router as the main WS callback
+            self.client.set_ws_callback(self._on_ws_message)
+            # --- End New Block ---
             self.strategy_orchestrator.set_database(self.database)
             self.execution_engine.set_emergency_protocols(self.emergency_protocols)
             
@@ -79,6 +89,9 @@ class AdvancedTradingBot:
             self._initialize_leverage()
             
             self._initialize_database()
+            
+            # --- Startup reconciliation logic removed ---
+            # (It will now run in the first trading cycle)
             
             if self.telegram_bot:
                 self.telegram_bot.send_channel_message(
@@ -469,6 +482,33 @@ class AdvancedTradingBot:
         except Exception as e:
             print(f"⚠️ Failed to initialize database: {e}")
 
+    def _on_ws_message(self, message: Dict):
+        """
+        Central WebSocket callback router.
+        Forwards messages to the correct module based on topic.
+        """
+        topic = message.get("topic", "")
+
+        try:
+            # Route public market data (Kline, Tickers)
+            if topic.startswith("kline.") or topic.startswith("tickers."):
+                if self.data_engine:
+                    self.data_engine._handle_ws_message(message)
+            
+            # Route private data (Orders, Positions)
+            elif topic in ["order", "position"]:
+                if self.execution_engine:
+                    self.execution_engine.handle_private_ws_message(message)
+            
+            # Optional: Log other message types if needed
+            # else:
+            #     self.logger.debug(f"Received unhandled WS message topic: {topic}")
+
+        except Exception as e:
+            self.logger.error(f"Error processing WS message in central router (topic: {topic}): {e}", exc_info=True)
+            if self.error_handler:
+                self.error_handler.handle_api_error(e, f"ws_central_router_{topic}")
+
     def get_portfolio_value(self) -> float:
         try:
             balance = self.client.get_wallet_balance()
@@ -598,6 +638,18 @@ class AdvancedTradingBot:
             account_fetch_duration = time.time() - account_fetch_start
             print(f"   Account data fetch complete in {account_fetch_duration:.2f}s")
 
+            # --- START FIX: Reconcile open positions before analysis ---
+            print("🔍 Reconciling open positions with exchange...")
+            recon_start = time.time()
+            try:
+                self._reconcile_open_positions(account_info['positions'])
+                recon_duration = time.time() - recon_start
+                print(f"   Reconciliation complete in {recon_duration:.2f}s")
+            except Exception as recon_e:
+                self.logger.error(f"Reconciliation failed: {recon_e}", exc_info=True)
+                self.error_handler.handle_api_error(recon_e, "reconciliation_cycle")
+            # --- END FIX ---
+
             if self.should_run_advanced_analysis():
                 print("🔬 Running Phase 4: Advanced Portfolio Analysis...")
                 try:
@@ -724,7 +776,42 @@ class AdvancedTradingBot:
                 trading_decisions.append(decision.copy()) 
 
                 print(f"\n   🚦 Evaluating {symbol}: {action} (Conf: {confidence:.1f}%)")
+
+                # --- START FIX: POSITION MANAGEMENT LOGIC ---
+                current_position = account_info['positions'].get(symbol)
                 
+                if current_position:
+                    current_side = current_position.get('side') # 'Buy' or 'Sell'
+                    
+                    if (action == 'BUY' and current_side == 'Buy') or \
+                       (action == 'SELL' and current_side == 'Sell'):
+                        print(f"      ℹ️ Ignoring {action} signal: Position already open in the same direction.")
+                        continue # Skip to the next decision
+
+                    elif (action == 'BUY' and current_side == 'Sell') or \
+                         (action == 'SELL' and current_side == 'Buy'):
+                        # This is an exit signal for the current position
+                        print(f"      ✨ New {action} signal conflicts with open {current_side} position. Closing position...")
+                        try:
+                            # Use the simple close_position method
+                            close_result = self.execution_engine.close_position(symbol)
+                            if close_result.get('success'):
+                                print(f"      ✅ Successfully placed order to close {symbol}.")
+                                if self.telegram_bot:
+                                    self.telegram_bot.log_position_closure(symbol, f"Opposing signal ({action}) received.")
+                                # After closing, we STOP. We don't open the new trade in the same cycle.
+                                continue # Skip to the next decision
+                            else:
+                                print(f"      ❌ Failed to place close order for {symbol}: {close_result.get('message')}")
+                                self.error_handler.handle_trading_error(Exception(close_result.get('message')), symbol, "exit_logic_close_failed")
+                                continue # Skip to the next decision
+                        except Exception as close_e:
+                            print(f"      ❌ Exception while trying to close {symbol}: {close_e}")
+                            self.error_handler.handle_trading_error(close_e, symbol, "exit_logic_exception")
+                            continue # Skip to the next decision
+                
+                # --- END FIX ---
+
                 if action != 'HOLD':
                     print(f"      📈 Signal Strength: {signal_strength}")
                     print(f"      🎯 Composite Score: {decision['composite_score']:.1f}")
@@ -766,16 +853,7 @@ class AdvancedTradingBot:
                             if execution_result['success']:
                                 print(f"      ✅ Trade executed successfully!")
                                 actions_taken += 1
-                                
-                                trade_record = decision.copy() 
-                                trade_record.update({
-                                    'success': True,
-                                    'order_id': execution_result.get('order_id'),
-                                    'timestamp': pd.Timestamp.now(),
-                                    'entry_price': execution_result.get('price', decision.get('current_price')) 
-                                })
-                                
-                                self.database.store_trade(trade_record) 
+
                                 self.risk_manager.record_trade_outcome(True, pnl=0) 
                                 
                                 if signal_strength in ['STRONG_BUY', 'STRONG_SELL']:
@@ -791,19 +869,22 @@ class AdvancedTradingBot:
                             else:
                                 error_msg = execution_result['message']
                                 print(f"      ❌ Trade execution failed: {error_msg}")
-                                trade_record = decision.copy()
-                                trade_record.update({
-                                    'success': False,
-                                    'error_message': error_msg,
-                                    'timestamp': pd.Timestamp.now() 
-                                })
-                                self.database.store_trade(trade_record)
-                                self.risk_manager.record_trade_outcome(False, pnl=0)
-                                if self.telegram_bot:
-                                    self.telegram_bot.log_trade_error(symbol, action, error_msg)
-                                self.error_handler.handle_trading_error(
-                                    Exception(error_msg), symbol, f"execution_{action}"
-                                )
+
+                                # --- NEW: Check for ignorable "not enough balance" error ---
+                                if "110007" in error_msg:
+                                    self.logger.info(f"Ignoring ignorable error in main loop: {error_msg}")
+                                    # We DO NOT store this in the database (engine already skipped)
+                                    # We DO NOT record this as a loss
+                                    # We DO NOT report this to the error handler
+                                else:
+                                    # This is a REAL failure
+                                    # The ExecutionEngine ALREADY stored this trade and recorded the loss.
+                                    # We just need to report the error to the ErrorHandler.
+                                    if self.telegram_bot:
+                                        self.telegram_bot.log_trade_error(symbol, action, error_msg)
+                                    self.error_handler.handle_trading_error(
+                                        Exception(error_msg), symbol, f"execution_{action}"
+                                    )
                         else:
                             print(f"      ❌ Risk management rejected trade: {risk_check['reason']}")
 
@@ -914,6 +995,136 @@ class AdvancedTradingBot:
             return True
         
         return False
+
+    def _reconcile_open_positions(self, bybit_live_positions: Dict[str, Dict]):
+        """
+        Checks local DB for open trades that are no longer open on Bybit
+        and updates them with the final PnL.
+        """
+        self.logger.info("Starting open position reconciliation...")
+        reconciled_count = 0
+        
+        try:
+            # 1. Get all trades from our DB that are still marked as "open"
+            stale_trades_map = self.database.get_open_stale_trades_by_symbol()
+            if not stale_trades_map:
+                self.logger.info("No stale trades found in local DB. Reconciliation complete.")
+                return
+
+            self.logger.info(f"Found {len(stale_trades_map)} symbols with open trades in local DB.")
+
+            # 2. Get Bybit's closed PnL history
+            first_trade_ts_iso = self.database.get_first_trade_timestamp_iso()
+            if not first_trade_ts_iso:
+                self.logger.info("No trades found in DB. Skipping reconciliation.")
+                return
+            
+            first_trade_dt = datetime.fromisoformat(first_trade_ts_iso)
+            first_trade_ms = int(first_trade_dt.timestamp() * 1000)
+            
+            # Fetch PnL history from the bot's start time
+            closed_pnl_resp = self.client.get_closed_pnl_history(
+                category="linear",
+                start_time_ms=first_trade_ms,
+                limit=50 # Max 50, fetch most recent
+            )
+
+            bybit_pnl_map = {}
+            if closed_pnl_resp and closed_pnl_resp.get('retCode') == 0:
+                pnl_records = closed_pnl_resp['result'].get('list', [])
+                pnl_records.reverse() # Process oldest first (FIFO)
+                for record in pnl_records:
+                    symbol = record.get('symbol')
+                    if symbol not in bybit_pnl_map:
+                        bybit_pnl_map[symbol] = []
+                    bybit_pnl_map[symbol].append(record)
+            else:
+                err = closed_pnl_resp.get('retMsg', 'No response') if closed_pnl_resp else 'No response'
+                self.logger.error(f"Failed to fetch closed PnL history for reconciliation: {err}")
+                return # Can't reconcile without PnL data
+
+            # 3. Find "ghost" positions
+            for symbol, stale_trades in stale_trades_map.items():
+                if symbol in bybit_live_positions:
+                    self.logger.debug(f"Position {symbol} is still live. Skipping reconciliation for it.")
+                    continue
+                
+                # This is a "ghost" position. It's in our DB but not live on Bybit.
+                self.logger.warning(f"Found 'ghost' position: {symbol}. In local DB but not live on Bybit. Attempting to match PnL.")
+
+                symbol_pnl_records = bybit_pnl_map.get(symbol, [])
+                if not symbol_pnl_records:
+                    self.logger.error(f"No closed PnL history found for ghost position {symbol}. Cannot reconcile.")
+                    continue
+                
+                trade_queue = stale_trades.copy() # FIFO queue of our DB trades
+
+                # 4. Match ghost trades to PnL records (FIFO)
+                for pnl_record in symbol_pnl_records:
+                    if not trade_queue:
+                        break # All stale trades for this symbol are matched
+
+                    pnl_record_qty = float(pnl_record.get('cumEntryValue', 0)) # Position value in USDT
+                    pnl_record_pnl = float(pnl_record.get('closedPnl', 0))
+                    pnl_record_exit_price = float(pnl_record.get('avgExitPrice', 0))
+                    pnl_record_exit_time_ms = int(pnl_record.get('updatedTime', 0))
+                    pnl_record_exit_time_iso = datetime.fromtimestamp(pnl_record_exit_time_ms / 1000.0).isoformat()
+                    pnl_record_exit_type = f"Reconciled_{pnl_record.get('exitType', 'Unknown')}"
+
+                    if pnl_record_qty == 0 or pnl_record_exit_time_ms == 0:
+                        continue # Invalid record
+
+                    qty_to_allocate = pnl_record_qty
+                    
+                    while qty_to_allocate > 1e-9 and trade_queue:
+                        stale_trade = trade_queue[0] # Get the oldest stale trade
+                        stale_trade_id = stale_trade['id']
+                        stale_trade_qty_usdt = float(stale_trade.get('position_size_usdt', 0))
+                        
+                        # Check if this PnL record has already been processed for this trade
+                        if stale_trade.get('outcome_updated', 0) == 1 or stale_trade.get('exit_price') is not None:
+                             self.logger.debug(f"Trade {stale_trade_id} already closed, popping from queue.")
+                             trade_queue.pop(0)
+                             continue
+
+                        self.logger.info(f"Matching PnL record (Time: {pnl_record_exit_time_iso}) to DB Trade ID {stale_trade_id} (Symbol: {symbol})")
+                        
+                        # Simple 1:1 match for now. Assumes one PnL record closes one DB trade.
+                        # This is a simplification. A more complex system would handle partial closes.
+                        
+                        trade_pnl_usdt = pnl_record_pnl
+                        trade_pnl_percent = 0.0
+                        if stale_trade_qty_usdt > 0:
+                            trade_pnl_percent = (trade_pnl_usdt / stale_trade_qty_usdt) * 100
+
+                        update_success = self.database.update_trade_exit_by_id(
+                            trade_id=stale_trade_id,
+                            exit_price=pnl_record_exit_price,
+                            pnl_usdt=trade_pnl_usdt,
+                            pnl_percent=trade_pnl_percent,
+                            exit_time_iso=pnl_record_exit_time_iso,
+                            exit_reason=pnl_record_exit_type
+                        )
+
+                        if update_success:
+                            self.logger.info(f"  -> SUCCESS: Reconciled trade {stale_trade_id} with PnL ${trade_pnl_usdt:.2f}")
+                            reconciled_count += 1
+                        else:
+                            self.logger.error(f"  -> FAILED: Could not update trade {stale_trade_id} in DB.")
+                        
+                        # Whether update succeeded or failed, remove from queue to avoid re-processing
+                        trade_queue.pop(0)
+                        qty_to_allocate = 0 # Simple 1:1 match, so PnL record is "used"
+            
+            if reconciled_count > 0:
+                self.logger.info(f"Reconciliation complete. Updated {reconciled_count} ghost trades.")
+                if self.telegram_bot:
+                    self.telegram_bot.log_important_event("RECONCILIATION", f"Successfully found and updated {reconciled_count} manually closed trades.")
+
+        except Exception as e:
+            self.logger.error(f"Critical error during position reconciliation: {e}", exc_info=True)
+            if self.error_handler:
+                self.error_handler.handle_api_error(e, "reconcile_open_positions")
 
     def _check_and_retrain_low_performance_models(self):
         try:

@@ -18,7 +18,7 @@ class DataEngine:
         self.logger = logging.getLogger('DataEngine') # Added logger
 
         # Set the callback in the BybitClient
-        self.client.set_ws_callback(self._handle_ws_message)
+        # self.client.set_ws_callback(self._handle_ws_message) # <<< THIS LINE IS REMOVED
         
         # --- DO NOT START STREAMS HERE ---
         # self.start_streams() # <<< COMMENT OUT OR DELETE THIS LINE

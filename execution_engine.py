@@ -34,9 +34,17 @@ class ExecutionEngine:
             self.twap_executor = TWAPExecutor(bybit_client)
             self.smart_router = SmartOrderRouter(bybit_client)
 
+            self.main_bot = None # Add this
             self._state_lock = threading.Lock()
 
             self._initialize_position_cache()
+
+    def set_main_bot(self, main_bot_instance):
+        """
+        Gives the execution engine a reference to the main bot
+        to trigger reconciliation on trade closures.
+        """
+        self.main_bot = main_bot_instance
 
     # --- New Method: Fetch and Cache Instrument Info ---
     def _fetch_initial_instrument_info(self):
@@ -171,15 +179,14 @@ class ExecutionEngine:
                 self.logger.error(f"Error initializing position cache: {e}", exc_info=True)
 
     def handle_private_ws_message(self, message: Dict):
-            """Processes private WebSocket messages (orders, positions). MUST be called from WS thread."""
             topic = message.get("topic")
-            data_list = message.get("data") # Data is usually a list
+            data_list = message.get("data")
 
             if not topic or not isinstance(data_list, list):
                 self.logger.warning(f"Received malformed private WS message: {message}")
                 return
 
-            with self._state_lock: # Ensure thread safety when modifying shared state
+            with self._state_lock:
                 try:
                     if topic == "order":
                         for order_data in data_list:
@@ -189,51 +196,58 @@ class ExecutionEngine:
                             self.logger.info(f"WS Order Update: {symbol} ID {order_id} -> {order_status}")
 
                             if order_id in self.open_orders:
-                                # Update status in internal tracking
                                 self.open_orders[order_id]['status'] = order_status
                                 self.open_orders[order_id]['updatedTime'] = message.get('ts', time.time()*1000)
                                 self.open_orders[order_id]['avgPrice'] = float(order_data.get('avgPrice', self.open_orders[order_id].get('avgPrice', 0)))
                                 self.open_orders[order_id]['cumExecQty'] = float(order_data.get('cumExecQty', self.open_orders[order_id].get('cumExecQty', 0)))
 
-                                # Remove order if it's in a final state
                                 if order_status in ['Filled', 'Cancelled', 'Rejected', 'Expired', 'PartiallyFilledCanceled']:
                                     del self.open_orders[order_id]
                                     self.logger.info(f"Removed closed/failed order {order_id} from internal tracking.")
                             elif order_status not in ['Filled', 'Cancelled', 'Rejected', 'Expired', 'PartiallyFilledCanceled']:
-                                # Log if we receive an update for an order not actively tracked but seems active
                                 self.logger.warning(f"Received WS update for untracked active order: {order_id} ({symbol} {order_status})")
 
                     elif topic == "position":
                         for pos_data in data_list:
                             symbol = pos_data.get('symbol')
+                            if not symbol:
+                                continue
+
                             size = float(pos_data.get('size', 0))
+                            
+                            # --- REAL-TIME RECONCILIATION TRIGGER ---
+                            # Check the *previous* size from our cache
+                            previous_size = self.position_cache.get(symbol, {}).get('size', 0)
+                            
+                            # Update the cache *after* getting the previous size
                             side = pos_data.get('side')
                             avg_price = float(pos_data.get('avgPrice', 0))
                             pos_value = float(pos_data.get('positionValue', 0))
                             pnl = float(pos_data.get('unrealisedPnl', 0))
                             liq_price = float(pos_data.get('liqPrice', 0))
-                            # Use Bybit's updatedTime if available, else WS message time
                             updated_time = int(pos_data.get('updatedTime', message.get('ts', time.time()*1000)))
+                            
+                            self.logger.debug(f"WS Position Update: {symbol} Size={size} Side={side} PNL={pnl}")
+                            self.position_cache[symbol] = {
+                                'size': size,
+                                'side': side,
+                                'avgPrice': avg_price,
+                                'positionValue': pos_value,
+                                'unrealisedPnl': pnl,
+                                'liqPrice': liq_price,
+                                'updatedTime': updated_time
+                            }
 
-                            if symbol:
-                                self.logger.debug(f"WS Position Update: {symbol} Size={size} Side={side} PNL={pnl}")
-                                # Update or create entry in cache
-                                self.position_cache[symbol] = {
-                                    'size': size,
-                                    'side': side,
-                                    'avgPrice': avg_price,
-                                    'positionValue': pos_value,
-                                    'unrealisedPnl': pnl,
-                                    'liqPrice': liq_price,
-                                    'updatedTime': updated_time # Store timestamp
-                                }
-                                # Don't delete if size is 0, just update it. Verification needs the 0 size info.
-                                if size == 0:
-                                    self.logger.info(f"Position size updated to 0 for {symbol} via WS.")
+                            # If position size *changed* to 0 from > 0, trigger reconciliation
+                            if size == 0 and previous_size > 0 and self.main_bot is not None:
+                                self.logger.warning(f"WebSocket detected position closure for {symbol}. Triggering real-time reconciliation.")
+                                self.main_bot.trigger_reconciliation_for_symbol(symbol)
+                            elif size == 0:
+                                self.logger.info(f"Position size updated to 0 for {symbol} via WS.")
+                            # --- END REAL-TIME RECONCILIATION TRIGGER ---
 
                 except Exception as e:
                     self.logger.error(f"Error processing private WS message: {e} | Message: {message}", exc_info=True)
-                    # Consider triggering reconciliation if errors persist
 
     def _validate_trade_decision(self, decision: Dict) -> bool:
             """Validates the structure and basic logic of a trade decision dictionary."""
@@ -965,7 +979,7 @@ class ExecutionEngine:
                     'error_message': f'Order value ${final_size_usdt:.4f} below minimum ${MIN_ORDER_VALUE_USDT:.2f}'
                 })
                 trade_record.pop('signals', None); trade_record.pop('market_context', None)
-                trade_record.pop('trade_quality', None); trade_record.pop('technical_indicators', None)
+                trade_record.pop('trade_quality', None)
                 self.trade_history.append(trade_record)
                 if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
                     self.risk_manager.database.store_trade(trade_record)
@@ -1012,6 +1026,31 @@ class ExecutionEngine:
                         'type': 'Market', 'avgPrice': executed_price
                     }
 
+                    # --- START FIX: Optimistically update position_cache ---
+                    # This ensures the bot knows it has an open position
+                    # so that real-time closure messages are handled correctly.
+                    current_pos_data = self.position_cache.get(symbol, {})
+                    old_size = current_pos_data.get('size', 0)
+                    
+                    # Note: This simple addition assumes the bot's logic
+                    # doesn't open opposing positions (hedging), which is correct.
+                    # Bybit's WS position update will send the "true" aggregated
+                    # data shortly after, but this sets the size > 0 immediately.
+                    
+                    new_size = old_size + final_quantity_float
+                    
+                    self.position_cache[symbol] = {
+                        'size': new_size,
+                        'side': side,
+                        'avgPrice': executed_price, # This is an approximation
+                        'positionValue': new_size * executed_price, # Approximation
+                        'unrealisedPnl': 0,
+                        'liqPrice': 0, # Unknown
+                        'updatedTime': int(time.time() * 1000)
+                    }
+                    self.logger.info(f"Optimistically updated position_cache for {symbol}: New size {new_size}")
+                    # --- END FIX ---
+
                 self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
 
                 trade_record = {**decision}
@@ -1027,7 +1066,6 @@ class ExecutionEngine:
                 trade_record.pop('signals', None)
                 trade_record.pop('market_context', None)
                 trade_record.pop('trade_quality', None)
-                trade_record.pop('technical_indicators', None)
 
                 self.trade_history.append(trade_record)
 
@@ -1054,6 +1092,14 @@ class ExecutionEngine:
             else:
                 error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
                 ret_code = order_response.get('retCode', -1) if order_response else -1
+
+                # --- NEW: Check for ignorable "not enough balance" error ---
+                if ret_code == 110007:
+                    self.logger.info(f"ℹ️ Trade skipped for {symbol}: {error_msg} (Code: {ret_code}). This is NOT an error.")
+                    # Return success=False but don't log as error, don't store in DB, don't record as loss
+                    return {'success': False, 'message': f'Skipped: {error_msg} (Code: {ret_code})'}
+                # --- END NEW CHECK ---
+                
                 self.logger.error(f"❌ Enhanced trade order failed for {symbol}: {error_msg} (Code: {ret_code})")
 
                 trade_record = {**decision}
@@ -1067,7 +1113,6 @@ class ExecutionEngine:
                 trade_record.pop('signals', None)
                 trade_record.pop('market_context', None)
                 trade_record.pop('trade_quality', None)
-                trade_record.pop('technical_indicators', None)
 
                 self.trade_history.append(trade_record)
                 if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
@@ -1097,7 +1142,6 @@ class ExecutionEngine:
                     trade_record.pop('signals', None)
                     trade_record.pop('market_context', None)
                     trade_record.pop('trade_quality', None)
-                    trade_record.pop('technical_indicators', None)
 
                     self.trade_history.append(trade_record)
                     if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
@@ -1973,7 +2017,7 @@ class ExecutionEngine:
             results = {'success': False, 'message': 'Emergency stop initiated'}
             try:
                 # 1. Cancel All Orders
-                cancel_result = self.cancel_all_orders() # Uses updated method
+                cancel_result = self.cancel_all_orders(settleCoin="USDT") # Uses updated method
                 if not cancel_result or cancel_result.get('retCode') != 0:
                     self.logger.error("Failed to cancel all orders during emergency stop.")
                     # Continue anyway

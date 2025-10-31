@@ -5,6 +5,7 @@ from typing import Dict, List
 import time
 import psutil
 from config import RiskConfig, RISK_MULTIPLIER
+import logging
 
 class AdvancedRiskManager:
     def __init__(self, bybit_client, aggressiveness: str = "conservative", error_handler=None, database=None, symbol_to_sector=None):
@@ -38,6 +39,7 @@ class AdvancedRiskManager:
         self.stress_test_results = {}
         self.regime_multipliers = {}
         self.volatility_regime = "normal"
+        self.logger = logging.getLogger(__name__)
         
         print(f"🎯 Risk Manager set to: {self.aggressiveness.upper()} mode")
         print(f"    • Max Position: ${self.max_position_size_usdt}")
@@ -68,7 +70,7 @@ class AdvancedRiskManager:
         try:
             balance = self.client.get_wallet_balance()
             if balance and balance.get('retCode') == 0:
-                self.daily_start_balance = float(balance['result']['list'][0]['totalEquity'])
+                self.daily_start_balance = float(balance['result']['list'][0]['totalWalletBalance'])
                 print(f"💰 Daily starting balance: ${self.daily_start_balance:.2f}")
                 
                 if self.database:
@@ -1027,37 +1029,32 @@ class AdvancedRiskManager:
             try:
                 wallet_balance = self.client.get_wallet_balance()
                 if wallet_balance and wallet_balance.get('retCode') == 0:
-                    total_equity = float(wallet_balance['result']['list'][0]['totalEquity'])
+                    current_wallet_balance = float(wallet_balance['result']['list'][0]['totalWalletBalance'])
 
-                    # 1. Check Max Risk Per Trade (based on equity)
                     max_risk_percent = self.config["base_size_percent"] * 2
-                    max_risk_per_trade = (total_equity * max_risk_percent) * self.risk_multiplier
+                    max_risk_per_trade = (current_wallet_balance * max_risk_percent) * self.risk_multiplier
                     
                     if adjusted_size > max_risk_per_trade:
                         adjusted_size = max_risk_per_trade
                         approval['reason'] = f"Size capped by max risk per trade (x{self.risk_multiplier}): ${max_risk_per_trade:.2f}"
 
-                    # 2. Check Max Position Size (hard limit)
                     if adjusted_size > scaled_max_position_size:
                         adjusted_size = scaled_max_position_size
                         approval['reason'] = f"Size capped by max_position_size (x{self.risk_multiplier}): ${scaled_max_position_size:.2f}"
                     
-                    # 3. Check Total Portfolio Exposure (based on current open positions)
                     current_exposure = self.get_current_exposure()
                     scaled_max_exposure_percent = 0.3 * self.risk_multiplier
-                    max_total_exposure = total_equity * scaled_max_exposure_percent
+                    max_total_exposure = current_wallet_balance * scaled_max_exposure_percent
                     
                     if current_exposure + adjusted_size > max_total_exposure:
                         available_exposure = max(0, max_total_exposure - current_exposure)
                         adjusted_size = available_exposure
                         approval['reason'] = f"Size capped by portfolio exposure limit (x{self.risk_multiplier}): ${available_exposure:.2f} available"
                     
-                    # If reason hasn't been set by a cap, set it to default
                     if not approval['reason']:
                         approval['reason'] = "Initial size within limits"
 
                 else:
-                    # Fallback if wallet balance fails
                     if adjusted_size > scaled_max_position_size:
                         adjusted_size = scaled_max_position_size
                         approval['reason'] = f"Size capped by max_position_size (x{self.risk_multiplier}): ${scaled_max_position_size:.2f} (Wallet fetch failed)"
@@ -1066,7 +1063,6 @@ class AdvancedRiskManager:
 
             except Exception as e:
                 self.logger.warning(f"Error checking wallet balance/exposure in can_trade: {e}")
-                # Fallback on exception
                 if adjusted_size > scaled_max_position_size:
                     adjusted_size = scaled_max_position_size
                     approval['reason'] = f"Size capped by max_position_size (x{self.risk_multiplier}): ${scaled_max_position_size:.2f} (Exception)"
@@ -1198,15 +1194,15 @@ class AdvancedRiskManager:
         try:
             wallet_balance = self.client.get_wallet_balance()
             if wallet_balance and wallet_balance.get('retCode') == 0:
-                total_equity = float(wallet_balance['result']['list'][0]['totalEquity'])
-                self.daily_pnl = ((total_equity - self.daily_start_balance) / self.daily_start_balance) * 100
+                current_wallet_balance = float(wallet_balance['result']['list'][0]['totalWalletBalance'])
+                self.daily_pnl = ((current_wallet_balance - self.daily_start_balance) / self.daily_start_balance) * 100
                 
                 if self.database and abs(self.daily_pnl) > 2.0:
                     self.database.store_system_event(
                         "DAILY_PNL_UPDATE",
                         {
                             'daily_pnl': self.daily_pnl,
-                            'portfolio_value': total_equity,
+                            'portfolio_value': current_wallet_balance,
                             'daily_start_balance': self.daily_start_balance
                         },
                         "INFO",
@@ -1305,7 +1301,7 @@ class AdvancedRiskManager:
         try:
             balance = self.client.get_wallet_balance()
             if balance and balance.get('retCode') == 0:
-                self.daily_start_balance = float(balance['result']['list'][0]['totalEquity'])
+                self.daily_start_balance = float(balance['result']['list'][0]['totalWalletBalance'])
                 self.daily_pnl = 0
                 self.trades_today = 0
                 self.reset_circuit_breaker()
