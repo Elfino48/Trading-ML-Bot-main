@@ -17,15 +17,200 @@ class DataEngine:
         self.data_lock = threading.Lock() # Lock for thread safety
         self.logger = logging.getLogger('DataEngine') # Added logger
 
-        # Set the callback in the BybitClient
-        # self.client.set_ws_callback(self._handle_ws_message) # <<< THIS LINE IS REMOVED
+        # BTC data tracking for correlation features
+        self.btc_data: Optional[pd.DataFrame] = None
+        self.btc_correlation_cache: Dict[str, Dict] = {}
+        self.btc_cache_timestamp: Dict[str, datetime] = {}
         
-        # --- DO NOT START STREAMS HERE ---
-        # self.start_streams() # <<< COMMENT OUT OR DELETE THIS LINE
-        # --- END ---
-        
-        # Fetch initial historical data base (This uses REST, it's fine)
+        # Fetch BTC data during initialization
+        self.initialize_btc_data()
         self.initialize_historical_data()
+
+    def initialize_btc_data(self, limit: int = 500):
+        """Initialize BTC data for correlation calculations"""
+        try:
+            print("⏳ Initializing BTC data for correlation features...")
+            btc_df = self.get_historical_data("BTCUSDT", TIMEFRAME, limit=limit)
+            if btc_df is not None and not btc_df.empty:
+                self.btc_data = btc_df
+                print(f"✅ BTC data initialized: {len(btc_df)} candles")
+            else:
+                print("⚠️ Failed to initialize BTC data")
+        except Exception as e:
+            print(f"❌ Error initializing BTC data: {e}")
+
+    def get_btc_correlation_features(self, symbol: str, current_data: pd.DataFrame) -> Dict[str, float]:
+        """Calculate BTC correlation features for a symbol"""
+        features = {}
+        
+        try:
+            if self.btc_data is None or self.btc_data.empty:
+                return self._get_default_btc_features()
+            
+            if current_data is None or current_data.empty:
+                return self._get_default_btc_features()
+            
+            # Ensure we have enough data
+            min_periods = 20
+            if len(current_data) < min_periods or len(self.btc_data) < min_periods:
+                return self._get_default_btc_features()
+            
+            # Align timestamps between symbol data and BTC data
+            symbol_returns = current_data['close'].pct_change().dropna()
+            btc_returns = self.btc_data['close'].pct_change().dropna()
+            
+            # Get common timestamps
+            common_index = symbol_returns.index.intersection(btc_returns.index)
+            if len(common_index) < min_periods:
+                return self._get_default_btc_features()
+            
+            symbol_aligned = symbol_returns.loc[common_index]
+            btc_aligned = btc_returns.loc[common_index]
+            
+            # Calculate various correlation metrics
+            features.update(self._calculate_correlation_metrics(symbol_aligned, btc_aligned))
+            features.update(self._calculate_relative_strength(symbol_aligned, btc_aligned))
+            features.update(self._calculate_btc_dominance_metrics(symbol, current_data))
+            
+            return features
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating BTC correlation for {symbol}: {e}")
+            return self._get_default_btc_features()
+
+    def _calculate_correlation_metrics(self, symbol_returns: pd.Series, btc_returns: pd.Series) -> Dict[str, float]:
+        """Calculate various correlation metrics"""
+        metrics = {}
+        
+        try:
+            # Rolling correlations for different timeframes
+            periods = [5, 10, 20, 50]
+            
+            for period in periods:
+                if len(symbol_returns) >= period:
+                    # Rolling correlation
+                    rolling_corr = symbol_returns.rolling(period).corr(btc_returns)
+                    metrics[f'btc_correlation_{period}'] = rolling_corr.iloc[-1] if not pd.isna(rolling_corr.iloc[-1]) else 0.0
+                    
+                    # Beta calculation (sensitivity to BTC moves)
+                    covariance = symbol_returns.rolling(period).cov(btc_returns)
+                    btc_variance = btc_returns.rolling(period).var()
+                    beta = covariance / btc_variance
+                    metrics[f'btc_beta_{period}'] = beta.iloc[-1] if not pd.isna(beta.iloc[-1]) else 1.0
+            
+            # Overall correlation
+            metrics['btc_correlation_overall'] = symbol_returns.corr(btc_returns) if len(symbol_returns) > 10 else 0.0
+            
+            # Correlation in different market regimes
+            high_vol_periods = btc_returns.abs() > btc_returns.abs().quantile(0.7)
+            if high_vol_periods.sum() > 5:
+                high_vol_corr = symbol_returns[high_vol_periods].corr(btc_returns[high_vol_periods])
+                metrics['btc_correlation_high_vol'] = high_vol_corr if not pd.isna(high_vol_corr) else 0.0
+            else:
+                metrics['btc_correlation_high_vol'] = 0.0
+                
+            return metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating correlation metrics: {e}")
+            return {f'btc_correlation_{p}': 0.0 for p in [5, 10, 20, 50]}
+
+    def _calculate_relative_strength(self, symbol_returns: pd.Series, btc_returns: pd.Series) -> Dict[str, float]:
+        """Calculate relative strength vs BTC"""
+        metrics = {}
+        
+        try:
+            # Relative returns (symbol vs BTC)
+            relative_returns = symbol_returns - btc_returns
+            
+            # Rolling relative performance
+            periods = [5, 10, 20]
+            for period in periods:
+                if len(relative_returns) >= period:
+                    rel_perf = (1 + relative_returns).rolling(period).apply(np.prod, raw=True) - 1
+                    metrics[f'relative_perf_vs_btc_{period}'] = rel_perf.iloc[-1] if not pd.isna(rel_perf.iloc[-1]) else 0.0
+            
+            # Relative strength momentum
+            if len(relative_returns) >= 10:
+                rel_strength = (1 + relative_returns.tail(5)).prod() / (1 + relative_returns.tail(10)).prod() - 1
+                metrics['relative_strength_momentum'] = rel_strength if not pd.isna(rel_strength) else 0.0
+            
+            # Outperformance ratio
+            outperformance_ratio = (symbol_returns > btc_returns).rolling(20).mean()
+            metrics['outperformance_ratio_20'] = outperformance_ratio.iloc[-1] if not pd.isna(outperformance_ratio.iloc[-1]) else 0.5
+            
+            return metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating relative strength: {e}")
+            return {}
+
+    def _calculate_btc_dominance_metrics(self, symbol: str, current_data: pd.DataFrame) -> Dict[str, float]:
+        """Calculate BTC dominance and market regime metrics"""
+        metrics = {}
+        
+        try:
+            if symbol == "BTCUSDT":
+                # BTC doesn't have BTC dominance metrics against itself
+                return {}
+            
+            # BTC dominance trend (simplified - in production you'd get actual dominance data)
+            if self.btc_data is not None and len(self.btc_data) >= 20:
+                # Use BTC momentum as proxy for dominance trend
+                btc_momentum = self.btc_data['close'].pct_change(10).iloc[-1]
+                metrics['btc_dominance_trend'] = 1.0 if btc_momentum > 0 else -1.0 if btc_momentum < 0 else 0.0
+                
+                # Altcoin season detection
+                btc_volatility = self.btc_data['close'].pct_change().rolling(20).std().iloc[-1]
+                symbol_volatility = current_data['close'].pct_change().rolling(20).std().iloc[-1]
+                
+                # Altcoins typically outperform in low BTC volatility environments
+                volatility_ratio = symbol_volatility / btc_volatility if btc_volatility > 0 else 1.0
+                metrics['altcoin_season_score'] = min(2.0, volatility_ratio)  # Cap at 2.0
+            
+            # Market regime based on BTC behavior
+            if self.btc_data is not None and len(self.btc_data) >= 50:
+                btc_returns = self.btc_data['close'].pct_change().dropna()
+                
+                # Bull/bear market detection
+                btc_sma_20 = self.btc_data['close'].rolling(20).mean().iloc[-1]
+                btc_sma_50 = self.btc_data['close'].rolling(50).mean().iloc[-1]
+                
+                if btc_sma_20 > btc_sma_50 and btc_returns.tail(5).mean() > 0:
+                    metrics['btc_market_regime'] = 1.0  # Bull market
+                elif btc_sma_20 < btc_sma_50 and btc_returns.tail(5).mean() < 0:
+                    metrics['btc_market_regime'] = -1.0  # Bear market
+                else:
+                    metrics['btc_market_regime'] = 0.0  # Neutral
+                
+            return metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating BTC dominance metrics: {e}")
+            return {}
+
+    def _get_default_btc_features(self) -> Dict[str, float]:
+        """Return default BTC correlation features when calculation fails"""
+        return {
+            'btc_correlation_5': 0.0,
+            'btc_correlation_10': 0.0,
+            'btc_correlation_20': 0.0,
+            'btc_correlation_50': 0.0,
+            'btc_correlation_overall': 0.0,
+            'btc_correlation_high_vol': 0.0,
+            'btc_beta_5': 1.0,
+            'btc_beta_10': 1.0,
+            'btc_beta_20': 1.0,
+            'btc_beta_50': 1.0,
+            'relative_perf_vs_btc_5': 0.0,
+            'relative_perf_vs_btc_10': 0.0,
+            'relative_perf_vs_btc_20': 0.0,
+            'relative_strength_momentum': 0.0,
+            'outperformance_ratio_20': 0.5,
+            'btc_dominance_trend': 0.0,
+            'altcoin_season_score': 1.0,
+            'btc_market_regime': 0.0
+        }
 
     def set_error_handler(self, error_handler):
         """Set error handler for data validation and WS errors"""

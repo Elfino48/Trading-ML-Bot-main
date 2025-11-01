@@ -133,9 +133,25 @@ class TradingDatabase:
                     model_version TEXT,
                     training_date TEXT NOT NULL,
                     training_bars_used INTEGER DEFAULT 0,
+                    -- NEW COLUMNS FOR ENHANCED ML --
+                    target_type TEXT DEFAULT 'unknown',
+                    hyperparameters_optimized BOOLEAN DEFAULT 0,
+                    market_cap_tier TEXT,
+                    volatility_tier TEXT,
+                    model_depth TEXT,
+                    enable_hpo BOOLEAN DEFAULT 0,
+                    max_features INTEGER DEFAULT 20,
+                    walk_forward_accuracy REAL,
+                    consistency_score REAL,
+                    overfit_score_rf REAL,
+                    overfit_score_gb REAL,
+                    feature_count INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # MIGRATION LOGIC: Add missing columns if table already exists from a previous version
+            self._add_missing_columns_if_needed()
 
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS market_data (
@@ -167,6 +183,48 @@ class TradingDatabase:
                     ensemble_used TEXT DEFAULT 'False',
                     feature_count INTEGER DEFAULT 0,
                     raw_prediction REAL DEFAULT 0,
+                    -- NEW COLUMNS FOR ENHANCED ML --
+                    symbol_volatility_tier TEXT,
+                    market_cap_tier TEXT,
+                    btc_correlation REAL,
+                    prediction_context TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # BTC correlation metrics table
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS btc_correlation_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    correlation_20 REAL,
+                    beta_20 REAL,
+                    relative_perf_20 REAL,
+                    outperformance_ratio REAL,
+                    dominance_trend REAL,
+                    altcoin_season_score REAL,
+                    market_regime REAL,
+                    correlation_quality REAL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Model health tracking table
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS model_health (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    health_score REAL,
+                    health_rating TEXT,
+                    accuracy_score REAL,
+                    overfitting_score REAL,
+                    consistency_score REAL,
+                    feature_score REAL,
+                    issues TEXT,
+                    recommendations TEXT,
+                    model_version TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -229,6 +287,60 @@ class TradingDatabase:
             self.logger.error(f"Failed to initialize enhanced database: {e}", exc_info=True)
             if self.connection: self.connection.rollback()
             raise
+
+    def _add_missing_columns_if_needed(self):
+        # List of columns to check/add to the trades table
+        trades_migrations = [
+            ('outcome_updated', 'INTEGER DEFAULT 0')
+        ]
+        
+        # List of columns to check/add to the ml_model_performance table (as per schema update)
+        ml_performance_migrations = [
+            ('target_type', 'TEXT DEFAULT "unknown"'),
+            ('hyperparameters_optimized', 'BOOLEAN DEFAULT 0'),
+            ('market_cap_tier', 'TEXT'),
+            ('volatility_tier', 'TEXT'),
+            ('model_depth', 'TEXT'),
+            ('enable_hpo', 'BOOLEAN DEFAULT 0'),
+            ('max_features', 'INTEGER DEFAULT 20'),
+            ('walk_forward_accuracy', 'REAL'),
+            ('consistency_score', 'REAL'),
+            ('overfit_score_rf', 'REAL'),
+            ('overfit_score_gb', 'REAL'),
+            ('feature_count', 'INTEGER DEFAULT 0')
+        ]
+
+        # NEW: List of columns to check/add to prediction_quality table
+        prediction_quality_migrations = [
+            ('symbol_volatility_tier', 'TEXT'),
+            ('market_cap_tier', 'TEXT'),
+            ('btc_correlation', 'REAL'),
+            ('prediction_context', 'TEXT')
+        ]
+        
+        self._perform_migrations('trades', trades_migrations)
+        self._perform_migrations('ml_model_performance', ml_performance_migrations)
+        # NEW: Perform migration for prediction_quality
+        self._perform_migrations('prediction_quality', prediction_quality_migrations)
+
+    def _perform_migrations(self, table_name, migrations):
+        for column_name, column_type in migrations:
+            try:
+                # Query PRAGMA table_info to check if column exists
+                self.cursor.execute(f"PRAGMA table_info({table_name})")
+                columns = [col[1] for col in self.cursor.fetchall()]
+                
+                if column_name not in columns:
+                    self.cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                    self.connection.commit()
+                    self.logger.info(f"MIGRATION: Added missing column {column_name} to {table_name}.")
+                # else: column already exists
+            except sqlite3.OperationalError as e:
+                # Catch specific errors like 'no such table' or general operational issues
+                if 'no such table' not in str(e):
+                    self.logger.warning(f"MIGRATION: Failed to add column {column_name} to {table_name} - Table exists but column fails: {e}")
+            except Exception as e:
+                self.logger.error(f"MIGRATION: Critical error during migration check for {column_name} in {table_name}: {e}")
 
     def store_trade(self, trade_data: Dict[str, Any]) -> bool:
             try:
@@ -421,6 +533,15 @@ class TradingDatabase:
             training_dt = metrics.get('training_date', datetime.now())
             db_training_date = training_dt.isoformat() if isinstance(training_dt, (datetime, pd.Timestamp)) else datetime.now().isoformat()
 
+            # Get symbol-specific configuration for storage
+            market_cap_tier_num = metrics.get('market_cap_tier', 0)
+            market_cap_tier_str = ['small_cap', 'mid_cap', 'large_cap'][market_cap_tier_num] if isinstance(market_cap_tier_num, int) else str(market_cap_tier_num)
+            
+            volatility_tier = metrics.get('volatility_tier', 'unknown')
+            model_depth = metrics.get('model_depth', 'medium')
+            enable_hpo = 1 if metrics.get('enable_hpo', False) else 0
+            max_features = metrics.get('max_features', 20)
+
             values_tuple = (
                 db_timestamp,
                 symbol,
@@ -440,7 +561,20 @@ class TradingDatabase:
                 int(metrics.get('test_samples', 0) or 0),
                 metrics.get('model_version'),
                 db_training_date,
-                int(metrics.get('training_bars_used', 0) or 0)
+                int(metrics.get('training_bars_used', 0) or 0),
+                # NEW FIELDS
+                metrics.get('target_type', 'unknown'),
+                1 if metrics.get('hyperparameters_optimized', False) else 0,
+                market_cap_tier_str,
+                volatility_tier,
+                model_depth,
+                enable_hpo,
+                max_features,
+                float(metrics.get('walk_forward_accuracy', 0.0) or 0.0),
+                float(metrics.get('consistency_score', 0.0) or 0.0),
+                float(metrics.get('overfit_score_rf', 0.0) or 0.0),
+                float(metrics.get('overfit_score_gb', 0.0) or 0.0),
+                int(metrics.get('feature_count', 0) or 0)
             )
 
             sql = '''
@@ -448,14 +582,18 @@ class TradingDatabase:
                     timestamp, symbol, accuracy, precision, recall, f1_score,
                     rf_accuracy, gb_accuracy, rf_precision, gb_precision,
                     rf_recall, gb_recall, rf_f1, gb_f1, training_samples,
-                    test_samples, model_version, training_date, training_bars_used
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    test_samples, model_version, training_date, training_bars_used,
+                    target_type, hyperparameters_optimized, market_cap_tier,
+                    volatility_tier, model_depth, enable_hpo, max_features,
+                    walk_forward_accuracy, consistency_score, overfit_score_rf,
+                    overfit_score_gb, feature_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
 
             cursor.execute(sql, values_tuple)
 
             self.connection.commit()
-            self.logger.info(f"Stored ML performance for {symbol}")
+            self.logger.info(f"Stored enhanced ML performance for {symbol}")
             return True
 
         except sqlite3.Error as e:
@@ -488,9 +626,13 @@ class TradingDatabase:
             return None
 
     def store_prediction_quality(self, symbol: str, prediction: int, actual: int = None,
-                                 confidence: float = 0, model_used: str = None,
-                                 features_used: List[str] = None, ensemble_used: bool = False,
-                                 feature_count: int = 0, raw_prediction: Any = 0) -> bool:
+                                confidence: float = 0, model_used: str = None,
+                                features_used: List[str] = None, ensemble_used: bool = False,
+                                feature_count: int = 0, raw_prediction: Any = 0,
+                                symbol_volatility_tier: str = 'unknown',
+                                market_cap_tier: str = 'unknown',
+                                btc_correlation: float = None,
+                                prediction_context: Dict = None) -> bool:
         try:
             cursor = self.connection.cursor()
 
@@ -503,7 +645,9 @@ class TradingDatabase:
             db_ensemble_used = str(ensemble_used)
 
             db_raw_prediction = float(raw_prediction) if isinstance(raw_prediction, (int, float, np.number)) else 0.0
-
+            
+            # Handle prediction context
+            context_json = json.dumps(prediction_context, cls=NpEncoder) if prediction_context else None
 
             values_tuple = (
                 symbol,
@@ -516,19 +660,26 @@ class TradingDatabase:
                 features_json,
                 db_ensemble_used,
                 int(feature_count or 0),
-                db_raw_prediction
+                db_raw_prediction,
+                # NEW FIELDS
+                symbol_volatility_tier,
+                market_cap_tier,
+                float(btc_correlation) if btc_correlation is not None else None,
+                context_json
             )
 
             sql = '''
                 INSERT INTO prediction_quality
-                (symbol, prediction, actual, confidence, correct, timestamp, model_used, features_used, ensemble_used, feature_count, raw_prediction)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (symbol, prediction, actual, confidence, correct, timestamp, 
+                model_used, features_used, ensemble_used, feature_count, raw_prediction,
+                symbol_volatility_tier, market_cap_tier, btc_correlation, prediction_context)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
 
             cursor.execute(sql, values_tuple)
 
             self.connection.commit()
-            self.logger.debug(f"Stored prediction quality for {symbol}")
+            self.logger.debug(f"Stored enhanced prediction quality for {symbol}")
             return True
 
         except sqlite3.Error as e:
@@ -537,6 +688,85 @@ class TradingDatabase:
             return False
         except Exception as e:
             self.logger.error(f"Failed to store prediction quality: {e} | Data: {locals()}", exc_info=True)
+            if self.connection: self.connection.rollback()
+            return False
+
+    def store_btc_correlation_metrics(self, symbol: str, correlation_data: Dict[str, float]) -> bool:
+        """Store BTC correlation metrics for analysis"""
+        try:
+            cursor = self.connection.cursor()
+            db_timestamp = datetime.now().isoformat()
+
+            values_tuple = (
+                symbol,
+                db_timestamp,
+                float(correlation_data.get('btc_correlation_20', 0)),
+                float(correlation_data.get('btc_beta_20', 1.0)),
+                float(correlation_data.get('relative_perf_vs_btc_20', 0)),
+                float(correlation_data.get('outperformance_ratio_20', 0.5)),
+                float(correlation_data.get('btc_dominance_trend', 0)),
+                float(correlation_data.get('altcoin_season_score', 1.0)),
+                float(correlation_data.get('btc_market_regime', 0)),
+                float(correlation_data.get('btc_correlation_quality', 0.5))
+            )
+
+            sql = '''
+                INSERT INTO btc_correlation_metrics 
+                (symbol, timestamp, correlation_20, beta_20, relative_perf_20,
+                outperformance_ratio, dominance_trend, altcoin_season_score,
+                market_regime, correlation_quality)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+
+            cursor.execute(sql, values_tuple)
+            self.connection.commit()
+            self.logger.debug(f"Stored BTC correlation metrics for {symbol}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to store BTC correlation metrics: {e}")
+            if self.connection: self.connection.rollback()
+            return False
+
+    def store_model_health(self, symbol: str, health_data: Dict) -> bool:
+        """Store model health assessment results"""
+        try:
+            cursor = self.connection.cursor()
+            db_timestamp = datetime.now().isoformat()
+
+            # Convert lists to JSON strings
+            issues_json = json.dumps(health_data.get('issues', []), cls=NpEncoder)
+            recommendations_json = json.dumps(health_data.get('recommendations', []), cls=NpEncoder)
+
+            values_tuple = (
+                symbol,
+                db_timestamp,
+                float(health_data.get('health_score', 0)),
+                health_data.get('health_rating', 'UNKNOWN'),
+                float(health_data.get('components', {}).get('accuracy_score', 0)),
+                float(health_data.get('components', {}).get('overfitting_score', 0)),
+                float(health_data.get('components', {}).get('consistency_score', 0)),
+                float(health_data.get('components', {}).get('feature_score', 0)),
+                issues_json,
+                recommendations_json,
+                health_data.get('model_version', 'v1')
+            )
+
+            sql = '''
+                INSERT INTO model_health 
+                (symbol, timestamp, health_score, health_rating, 
+                accuracy_score, overfitting_score, consistency_score, feature_score,
+                issues, recommendations, model_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+
+            cursor.execute(sql, values_tuple)
+            self.connection.commit()
+            self.logger.info(f"Stored model health for {symbol}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to store model health: {e}")
             if self.connection: self.connection.rollback()
             return False
 
@@ -1177,11 +1407,11 @@ class TradingDatabase:
             deleted_counts = {}
 
             tables_ts = ['trades', 'system_events', 'market_data', 'feature_importance',
-                         'model_training_history', 'model_drift_detection', 'ml_model_performance',
-                         'prediction_quality']
+                        'model_training_history', 'model_drift_detection', 'ml_model_performance',
+                        'prediction_quality', 'btc_correlation_metrics', 'model_health']  # Added new tables
             for table in tables_ts:
-                 cursor.execute(f'DELETE FROM {table} WHERE timestamp < ?', (cutoff_datetime_str if table != 'model_training_history' else ml_cutoff_str,))
-                 deleted_counts[table] = cursor.rowcount
+                cursor.execute(f'DELETE FROM {table} WHERE timestamp < ?', (cutoff_datetime_str if table != 'model_training_history' else ml_cutoff_str,))
+                deleted_counts[table] = cursor.rowcount
 
             cursor.execute('DELETE FROM performance_metrics WHERE date < ?', (cutoff_date_str,))
             deleted_counts['performance_metrics'] = cursor.rowcount

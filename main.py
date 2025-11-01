@@ -28,6 +28,12 @@ class AdvancedTradingBot:
         self.start_time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         print(f"🚀 Initializing Advanced Trading Bot (Run ID: {self.start_time_str})...")
         
+        # NEW: Training Lock and Event
+        self.training_lock = threading.Lock()
+        self.training_complete_event = threading.Event()
+        self.training_complete_event.set() # Initially set (no training in progress)
+        # END NEW
+        
         self._setup_comprehensive_logging()
         self._ws_unhealthy_start_time = None
 
@@ -49,6 +55,9 @@ class AdvancedTradingBot:
                 aggressiveness,
                 run_start_time_str=self.start_time_str
             )
+
+            self.strategy_orchestrator.ml_predictor.set_data_engine(self.data_engine)
+
             self.execution_engine = ExecutionEngine(self.client, self.risk_manager)
             
             self.error_handler = ErrorHandler(self.telegram_bot)
@@ -308,6 +317,16 @@ class AdvancedTradingBot:
             print("⚠️ Continuing without ML models or using potentially incomplete set")
 
     def _retrain_all_models(self, force_all: bool = False, symbols_to_train: List[str] = None) -> int:
+        
+        # NEW: Synchronization Logic
+        if not self.training_lock.acquire(blocking=False):
+            self.logger.warning("[MODEL RETRAINING] Retraining already in progress. Skipping new request.")
+            return 0
+        
+        self.training_complete_event.clear() # Signal that training is starting
+        self.logger.info("[MODEL RETRAINING] Acquired training lock. Trading cycles will now wait.")
+        # END NEW
+
         trained_count = 0
         self.logger.info("[MODEL RETRAINING] Starting enhanced retraining process...")
         
@@ -323,7 +342,11 @@ class AdvancedTradingBot:
         
         if not symbols_to_retrain:
             self.logger.info("[MODEL RETRAINING] No models need retraining at this time")
+            # NEW: Release lock immediately if no work is done
+            self.training_lock.release()
+            self.training_complete_event.set()
             return 0
+            # END NEW
 
         for symbol in symbols_to_retrain:
             try:
@@ -376,6 +399,12 @@ class AdvancedTradingBot:
                 self.logger.info(f"[MODEL RETRAINING] Saved {trained_count} updated models to disk")
             else:
                 self.logger.error("[MODEL RETRAINING] Failed to save models to disk")
+        
+        # NEW: Release Synchronization Logic
+        self.training_lock.release()
+        self.training_complete_event.set() # Signal that training is done
+        self.logger.info("[MODEL RETRAINING] Released training lock. Trading cycles can now resume.")
+        # END NEW
         
         return trained_count
 
@@ -454,6 +483,10 @@ class AdvancedTradingBot:
         """
         Public method to trigger a full, non-blocking retraining run.
         """
+        if not self.training_complete_event.is_set():
+             self.logger.warning("Retrain requested via Telegram, but another training is already in progress. Ignoring.")
+             return False
+             
         self.logger.info(f"Triggering asynchronous retraining (Force All: {force_all})...")
         # Use existing _retrain_all_models thread target
         retrain_thread = threading.Thread(
@@ -524,6 +557,17 @@ class AdvancedTradingBot:
             print("\n" + "="*60)
             print("🔄 Starting Enhanced Trading Cycle...")
             print("="*60)
+            
+            # NEW: Wait for training lock
+            if not self.training_complete_event.is_set():
+                print("🧠 Waiting for model retraining to complete before analysis...")
+                self.training_complete_event.wait(timeout=60) # Wait up to 60 seconds
+                if not self.training_complete_event.is_set():
+                    self.logger.error("ML model retraining timed out or failed to set event. Skipping cycle.")
+                    print("❌ Retraining did not finish in time. Skipping cycle to maintain stability.")
+                    return []
+                print("✅ Retraining complete. Resuming trading cycle.")
+            # END NEW
             
             if not self.error_handler.should_continue_trading():
                 print("🚫 Trading suspended due to error conditions")
@@ -1314,11 +1358,12 @@ class AdvancedTradingBot:
             
         old_level = self.aggressiveness
         self.aggressiveness = new_aggressiveness
+        # The Orchestrator's internal method handles its own components, but we manually update the RiskManager here too.
         self.strategy_orchestrator.change_aggressiveness(new_aggressiveness)
         self.risk_manager.aggressiveness = new_aggressiveness
         self.risk_manager.config = RiskConfig.get_config(new_aggressiveness)
-        self.risk_manager._set_parameters_from_config()
-        
+        self.risk_manager._set_parameters_from_config() # This is the correct method name
+
         print(f"🔄 Strategy aggressiveness changed from {old_level.upper()} to {new_aggressiveness.upper()}")
         
         self.database.store_system_event(
@@ -1371,7 +1416,7 @@ def main():
     print("💾 Database Logging: Active")
     print("🆘 Emergency Protocols: Active")
 
-    selected_aggressiveness = "moderate"
+    selected_aggressiveness = "aggressive"
     mode_choice = "1"
 
     print(f"\n🎯 Selected: {selected_aggressiveness.upper()} mode")
@@ -1415,13 +1460,34 @@ def main():
                      print("🛑 Stop command received. Exiting main loop.")
                      break
 
-                if not bot.error_handler.should_continue_trading():
-                    bot.logger.warning("Circuit breaker active. Pausing for 10 minutes...")
+                # Check both error circuit breaker and emergency mode
+                is_circuit_breaker_active = not bot.error_handler.should_continue_trading()
+                is_emergency_active = bot.emergency_protocols.emergency_mode
+
+                if is_circuit_breaker_active or is_emergency_active:
+                    reason = ("Error Circuit Breaker" if is_circuit_breaker_active else "") + \
+                             (" & " if is_circuit_breaker_active and is_emergency_active else "") + \
+                             ("Emergency Protocols" if is_emergency_active else "")
+
+                    bot.logger.critical(f"BREAK ACTIVE ({reason}). Pausing for 10 minutes...")
                     
+                    # Log the pause
+                    if bot.telegram_bot:
+                        bot.telegram_bot.log_important_event(
+                            "CRITICAL PAUSE",
+                            f"Trading suspended due to {reason}. Resuming in 10 minutes."
+                        )
+
                     time.sleep(600) 
                     
-                    bot.logger.info("10-minute pause complete. Resetting circuit breaker...")
-                    bot.reset_error_handler() 
+                    # Reset after pause
+                    if is_circuit_breaker_active:
+                        bot.reset_error_handler() 
+                        bot.logger.info("Error Circuit Breaker reset.")
+                    if is_emergency_active:
+                        bot.reset_emergency_mode("Automated 10-minute pause completion.")
+                        bot.logger.info("Emergency Protocols reset.")
+                        
                     bot.logger.info("Resuming trading cycles.")
                     continue 
 

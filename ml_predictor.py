@@ -1,4 +1,5 @@
 import json
+import time
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -47,7 +48,7 @@ class MLPredictor:
         self.auto_save_interval = 10
         self.training_count = 0
         
-        # Enhanced configuration
+        # Enhanced configuration - DEFINE ALL CONFIGS BEFORE USING THEM
         self.quality_metrics_window = 100
         self.drift_threshold = 0.15
         self.performance_alert_threshold = 0.1
@@ -64,15 +65,41 @@ class MLPredictor:
         self.walk_forward_splits = 5
         self.validation_window = 200
         self.min_training_samples = 150
+
+        # BTC correlation configuration
+        self.btc_correlation_enabled = True
+        self.btc_correlation_cache = {}
+        self.btc_correlation_cache_ttl = 300  # 5 minutes
         
-        # NEW: Multi-timeframe target configuration
+        print(f"   • BTC correlation features: {self.btc_correlation_enabled}")
+        
+        # NEW: Multi-timeframe target configuration - DEFINE BEFORE PRINT
         self.target_configs = [
             {'periods': 5, 'weight': 0.4, 'threshold_multiplier': 1.5},   # Short-term
             {'periods': 10, 'weight': 0.3, 'threshold_multiplier': 2.0},  # Medium-term
             {'periods': 20, 'weight': 0.3, 'threshold_multiplier': 2.5}   # Long-term
         ]
         
-        # NEW: Enhanced model parameters with hyperparameter optimization
+        # NEW: Symbol-specific configurations for accuracy improvement
+        self.symbol_volatility_profiles = {
+            'BTCUSDT': {'volatility_tier': 'low', 'multiplier': 1.3, 'timeframes': [5, 10, 20]},
+            'ETHUSDT': {'volatility_tier': 'medium', 'multiplier': 1.6, 'timeframes': [5, 10, 15]},
+            'BNBUSDT': {'volatility_tier': 'high', 'multiplier': 2.0, 'timeframes': [5, 8, 12]},
+            'XRPUSDT': {'volatility_tier': 'high', 'multiplier': 2.0, 'timeframes': [5, 8, 12]},
+            'SOLUSDT': {'volatility_tier': 'extreme', 'multiplier': 2.5, 'timeframes': [5, 8]},
+            'DOGEUSDT': {'volatility_tier': 'extreme', 'multiplier': 2.5, 'timeframes': [5, 8]}
+        }
+
+        self.symbol_model_complexity = {
+            'BTCUSDT': {'max_features': 30, 'enable_hpo': True, 'model_depth': 'deep'},
+            'ETHUSDT': {'max_features': 25, 'enable_hpo': True, 'model_depth': 'medium'},
+            'BNBUSDT': {'max_features': 20, 'enable_hpo': False, 'model_depth': 'medium'},
+            'XRPUSDT': {'max_features': 15, 'enable_hpo': False, 'model_depth': 'simple'},
+            'SOLUSDT': {'max_features': 15, 'enable_hpo': False, 'model_depth': 'simple'},
+            'DOGEUSDT': {'max_features': 12, 'enable_hpo': False, 'model_depth': 'simple'}
+        }
+        
+        # Enhanced model parameters with hyperparameter optimization
         self.rf_param_dist = {
             'n_estimators': randint(50, 200),
             'max_depth': randint(3, 15),
@@ -116,11 +143,13 @@ class MLPredictor:
         self.enable_hyperparameter_optimization = True
         self.hpo_n_iter = 20
         self.hpo_cv = 3
-        
+
+        # ✅ NOW PRINT AFTER ALL CONFIGS ARE DEFINED
         print(f"🤖 Enhanced ML Predictor initialized with scikit-learn {sklearn.__version__}")
         print(f"   • Multi-timeframe targets: {len(self.target_configs)} horizons")
         print(f"   • Hyperparameter optimization: {self.enable_hyperparameter_optimization}")
         print(f"   • Max features: {self.max_features}")
+        print(f"   • Symbol-specific configurations: {len(self.symbol_volatility_profiles)} symbols")
 
     def set_error_handler(self, error_handler):
         self.error_handler = error_handler
@@ -180,12 +209,16 @@ class MLPredictor:
                 symbols_needing_retraining.append(symbol)
         return symbols_needing_retraining
 
-    def prepare_features_point_in_time(self, df: pd.DataFrame, current_idx: int, lookback: int = 50) -> pd.DataFrame:
-        """Enhanced feature preparation with volume and regime features"""
+    def set_data_engine(self, data_engine):
+        """Set data engine for BTC correlation features"""
+        self.data_engine = data_engine
+
+    def prepare_features_point_in_time(self, df: pd.DataFrame, current_idx: int, lookback: int = 50, symbol: str = None) -> pd.DataFrame:
+        features = {}
+        
         if current_idx < lookback:
             return pd.DataFrame()
 
-        features = {}
         current_data = df.iloc[:current_idx+1]
         
         close_prices = current_data['close'].astype(float)
@@ -195,125 +228,372 @@ class MLPredictor:
         opens = current_data['open'].astype(float)
 
         try:
-            # 1. Enhanced volume-based features
-            features['volume_momentum'] = volume.iloc[-1] / volume.rolling(10).mean().iloc[-1] if len(volume) > 10 else 1
-            features['volume_acceleration'] = (volume.iloc[-1] - volume.iloc[-5]) / volume.iloc[-5] if len(volume) > 5 else 0
+            # 1. Symbol-specific volatility scaling
+            volatility_20 = close_prices.pct_change().rolling(20).std().iloc[-1]
+            features['symbol_specific_volatility'] = volatility_20
             
-            # Volume volatility
-            if len(volume) > 20:
-                features['volume_volatility'] = volume.pct_change().rolling(20).std().iloc[-1]
-            else:
-                features['volume_volatility'] = 0
+            # 2. BTC Dominance correlation (enhanced implementation)
+            if symbol and symbol != 'BTCUSDT' and hasattr(self, 'data_engine') and self.data_engine and self.btc_correlation_enabled:
+                btc_features = self._calculate_btc_correlation_features(symbol, current_data)
+                features.update(btc_features)
+            
+            # 3. Market cap tier features (now numerical)
+            if symbol:
+                market_cap_tier = self._get_market_cap_tier(symbol)  # Returns 0, 1, or 2
+                features['market_cap_tier'] = market_cap_tier
                 
-            # Price-volume correlation
-            if len(close_prices) > 20:
-                price_changes = close_prices.pct_change().tail(20)
-                volume_changes = volume.pct_change().tail(20)
-                features['price_volume_corr'] = price_changes.corr(volume_changes) if not price_changes.isna().all() else 0
-            else:
-                features['price_volume_corr'] = 0
+                # Adjust feature complexity based on symbol type
+                if market_cap_tier == 2:  # large_cap
+                    features.update(self._calculate_advanced_features(close_prices, high_prices, low_prices, volume))
+                elif market_cap_tier == 1:  # mid_cap
+                    features.update(self._calculate_medium_complexity_features(close_prices, high_prices, low_prices, volume))
+                else:  # small_cap
+                    features.update(self._calculate_simple_features(close_prices, high_prices, low_prices, volume))
 
-            # 2. Regime-aware features
-            if len(close_prices) > 20:
-                price_change_20 = (close_prices.iloc[-1] - close_prices.iloc[-20]) / close_prices.iloc[-20]
-                features['in_trending_regime'] = 1 if abs(price_change_20) > 0.03 else 0
-                
-                volatility_20 = close_prices.pct_change().rolling(20).std().iloc[-1]
-                features['in_high_vol_regime'] = 1 if volatility_20 > 0.025 else 0
-            else:
-                features['in_trending_regime'] = 0
-                features['in_high_vol_regime'] = 0
-
-            # 3. Existing price-based features (keep your current implementations)
+            # 4. Volume profile features
+            volume_profile = self._calculate_volume_profile(volume, symbol)
+            features.update(volume_profile)
+            
+            # 5. Existing features (keep but with volatility adjustment)
             for period in [1, 3, 5, 10, 20]:
                 if len(close_prices) > period:
-                    features[f'returns_{period}'] = close_prices.iloc[-1] / close_prices.iloc[-period-1] - 1
+                    vol_adjusted_return = (close_prices.iloc[-1] / close_prices.iloc[-period-1] - 1) / max(volatility_20, 0.001)
+                    features[f'vol_adjusted_returns_{period}'] = vol_adjusted_return
             
-            # Volatility features
-            for period in [5, 10, 20]:
-                if len(close_prices) > period:
-                    features[f'volatility_{period}'] = close_prices.pct_change().rolling(period).std().iloc[-1]
-            
-            # Volume features
-            for period in [5, 10, 20]:
-                if len(volume) > period:
-                    features[f'volume_ma_ratio_{period}'] = volume.iloc[-1] / volume.rolling(period).mean().iloc[-1]
-            
-            features['volume_volatility'] = volume.pct_change().rolling(20).std().iloc[-1]
-            
-            # 4. Advanced price action features
-            features['high_low_ratio'] = (high_prices.iloc[-1] - low_prices.iloc[-1]) / close_prices.iloc[-1]
-            features['close_open_ratio'] = (close_prices.iloc[-1] - opens.iloc[-1]) / opens.iloc[-1]
-            features['body_size'] = abs(opens.iloc[-1] - close_prices.iloc[-1]) / (high_prices.iloc[-1] - low_prices.iloc[-1]) if (high_prices.iloc[-1] - low_prices.iloc[-1]) > 0 else 0
-            
-            # 5. Multi-timeframe trend features
-            for short_period, long_period in [(5, 20), (10, 50), (20, 100)]:
-                if len(close_prices) > long_period:
-                    sma_short = close_prices.rolling(short_period).mean().iloc[-1]
-                    sma_long = close_prices.rolling(long_period).mean().iloc[-1]
-                    features[f'sma_ratio_{short_period}_{long_period}'] = sma_short / sma_long - 1
-            
-            # 6. Momentum features across multiple periods
-            for period in [6, 14, 21]:
-                if len(close_prices) > period:
-                    features[f'rsi_{period}'] = self._calculate_rsi_point_in_time(close_prices, period)
-            
-            for period in [5, 10, 20]:
-                if len(close_prices) > period:
-                    features[f'momentum_{period}'] = close_prices.iloc[-1] / close_prices.iloc[-period-1] - 1
-            
-            # 7. Support/resistance levels
-            for period in [20, 50]:
-                if len(close_prices) > period:
-                    features[f'price_vs_high_{period}'] = close_prices.iloc[-1] / high_prices.rolling(period).max().iloc[-1]
-                    features[f'price_vs_low_{period}'] = close_prices.iloc[-1] / low_prices.rolling(period).min().iloc[-1]
-            
-            # 8. Volatility and risk features
-            features['atr_14'] = self._calculate_atr_point_in_time(high_prices, low_prices, close_prices, 14)
-            features['atr_ratio'] = features['atr_14'] / close_prices.iloc[-1]
-            
-            # 9. Bollinger Bands with multiple configurations
-            for period, std in [(20, 2), (50, 2)]:
-                if len(close_prices) > period:
-                    bb_upper, bb_middle, bb_lower = self._calculate_bollinger_bands_point_in_time(close_prices, period, std)
-                    features[f'bb_position_{period}'] = (close_prices.iloc[-1] - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
-            
-            # 10. MACD with different configurations
-            features['macd'], features['macd_signal'] = self._calculate_macd_point_in_time(close_prices)
-            features['macd_histogram'] = features['macd'] - features['macd_signal']
-            
-            # 11. Market regime and advanced features
-            features['market_regime_feature'] = self._calculate_market_regime_feature(close_prices, high_prices, low_prices)
-            features['volatility_regime_feature'] = self._calculate_volatility_regime_feature(close_prices)
-            
-            # 12. Time-based and cyclical features
-            if hasattr(current_data.index[-1], 'weekday'):
-                features['weekday_effect'] = current_data.index[-1].weekday()
-                features['hour_effect'] = current_data.index[-1].hour
-            
-            # 13. Advanced statistical features
-            features['price_efficiency'] = self._calculate_price_efficiency(close_prices)
-            if len(close_prices) >= 100:
-                features['hurst_exponent'] = self._calculate_hurst_exponent(close_prices.tail(100))
-            else:
-                features['hurst_exponent'] = 0.5
-                
-            # 14. Market microstructure features
-            features['market_micro_1'] = self._calculate_market_microstructure_1(high_prices, low_prices, close_prices, volume)
-            features['market_micro_2'] = self._calculate_market_microstructure_2(high_prices, low_prices, close_prices, volume)
+            # Ensure all features are numerical
+            features = self._ensure_numerical_features(features)
             
             return pd.DataFrame([features]).fillna(0)
             
         except Exception as e:
             if self.error_handler:
-                self.error_handler.handle_ml_error(e, "ALL", "feature_preparation")
+                self.error_handler.handle_ml_error(e, symbol, "feature_preparation")
             return pd.DataFrame()
 
-    def create_multi_timeframe_targets(self, df: pd.DataFrame, current_idx: int) -> List[int]:
+    def _ensure_numerical_features(self, features: Dict) -> Dict:
+        """Convert all feature values to numerical types"""
+        numerical_features = {}
+        
+        for key, value in features.items():
+            try:
+                # Convert to float if possible, otherwise use 0
+                if isinstance(value, (int, float, np.number)):
+                    numerical_features[key] = float(value)
+                elif isinstance(value, (str, bool)):
+                    # Convert strings and booleans to numerical
+                    if isinstance(value, bool):
+                        numerical_features[key] = 1.0 if value else 0.0
+                    elif value.lower() in ['true', 'false']:
+                        numerical_features[key] = 1.0 if value.lower() == 'true' else 0.0
+                    else:
+                        # Try to convert string to float, if fails use 0
+                        try:
+                            numerical_features[key] = float(value)
+                        except (ValueError, TypeError):
+                            numerical_features[key] = 0.0
+                else:
+                    numerical_features[key] = 0.0
+            except Exception as e:
+                self.logger.warning(f"Could not convert feature {key} with value {value} to float: {e}")
+                numerical_features[key] = 0.0
+        
+        return numerical_features
+
+    def _calculate_btc_correlation_features(self, symbol: str, current_data: pd.DataFrame) -> Dict[str, float]:
+        """Calculate BTC correlation features with caching"""
+        try:
+            # Check cache first
+            cache_key = f"{symbol}_{len(current_data)}"
+            if cache_key in self.btc_correlation_cache:
+                cache_entry = self.btc_correlation_cache[cache_key]
+                if time.time() - cache_entry['timestamp'] < self.btc_correlation_cache_ttl:
+                    return cache_entry['features']
+            
+            # Calculate fresh features
+            if hasattr(self, 'data_engine') and self.data_engine:
+                features = self.data_engine.get_btc_correlation_features(symbol, current_data)
+                
+                # Apply symbol-specific interpretation
+                features = self._apply_symbol_specific_btc_interpretation(symbol, features)
+                
+                # Cache the results
+                self.btc_correlation_cache[cache_key] = {
+                    'features': features,
+                    'timestamp': time.time()
+                }
+                
+                # Clean old cache entries
+                self._clean_btc_correlation_cache()
+                
+                return features
+            else:
+                return self._get_default_btc_features()
+                
+        except Exception as e:
+            self.logger.error(f"Error calculating BTC correlation features for {symbol}: {e}")
+            return self._get_default_btc_features()
+
+    def _apply_symbol_specific_btc_interpretation(self, symbol: str, btc_features: Dict[str, float]) -> Dict[str, float]:
+        """Apply symbol-specific interpretation to BTC correlation features"""
+        enhanced_features = btc_features.copy()
+        
+        # Large caps (BTC/ETH) should have high BTC correlation
+        if symbol in ['BTCUSDT', 'ETHUSDT']:
+            # High correlation is normal for large caps
+            correlation_penalty = 0.0
+        else:
+            # Altcoins: very high correlation might indicate lack of independent movement
+            high_corr_penalty = max(0, abs(btc_features.get('btc_correlation_20', 0)) - 0.7)
+            correlation_penalty = high_corr_penalty * 0.5
+        
+        # Beta interpretation
+        beta_20 = btc_features.get('btc_beta_20', 1.0)
+        if symbol in ['SOLUSDT', 'DOGEUSDT']:
+            # High beta expected for volatile altcoins
+            beta_deviation = abs(beta_20 - 2.0) / 2.0
+        elif symbol in ['BNBUSDT', 'XRPUSDT']:
+            # Medium beta expected
+            beta_deviation = abs(beta_20 - 1.5) / 1.5
+        else:
+            # Low beta expected for large caps
+            beta_deviation = abs(beta_20 - 1.0)
+        
+        enhanced_features['btc_correlation_quality'] = 1.0 - (correlation_penalty + beta_deviation * 0.5)
+        enhanced_features['btc_beta_deviation'] = beta_deviation
+        
+        return enhanced_features
+
+    def _get_default_btc_features(self) -> Dict[str, float]:
+        """Return default BTC correlation features"""
+        return {
+            'btc_correlation_5': 0.0,
+            'btc_correlation_10': 0.0,
+            'btc_correlation_20': 0.0,
+            'btc_correlation_50': 0.0,
+            'btc_correlation_overall': 0.0,
+            'btc_correlation_high_vol': 0.0,
+            'btc_beta_5': 1.0,
+            'btc_beta_10': 1.0,
+            'btc_beta_20': 1.0,
+            'btc_beta_50': 1.0,
+            'relative_perf_vs_btc_5': 0.0,
+            'relative_perf_vs_btc_10': 0.0,
+            'relative_perf_vs_btc_20': 0.0,
+            'relative_strength_momentum': 0.0,
+            'outperformance_ratio_20': 0.5,
+            'btc_dominance_trend': 0.0,
+            'altcoin_season_score': 1.0,
+            'btc_market_regime': 0.0,
+            'btc_correlation_quality': 0.5,
+            'btc_beta_deviation': 0.5
+        }
+
+    def _clean_btc_correlation_cache(self):
+        """Clean old entries from BTC correlation cache"""
+        current_time = time.time()
+        keys_to_remove = []
+        
+        for key, entry in self.btc_correlation_cache.items():
+            if current_time - entry['timestamp'] > self.btc_correlation_cache_ttl * 2:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del self.btc_correlation_cache[key]
+
+    def _adjust_target_weight(self, base_weight: float, symbol: str, trend_strength: float, volatility: float) -> float:
+        """Adjust target weight based on symbol and market conditions"""
+        adjusted_weight = base_weight
+        
+        # Reduce weight during high volatility for all symbols
+        if volatility > 0.03:
+            adjusted_weight *= 0.8
+        
+        # Symbol-specific adjustments
+        if symbol in self.symbol_volatility_profiles:
+            profile = self.symbol_volatility_profiles[symbol]
+            if profile['volatility_tier'] in ['high', 'extreme']:
+                # Reduce weight for volatile symbols in strong trends
+                if trend_strength > 0.6:
+                    adjusted_weight *= 0.7
+        
+        return max(0.1, adjusted_weight)  # Ensure minimum weight
+
+    def _calculate_volume_profile(self, volume: pd.Series, symbol: str) -> Dict[str, float]:
+        """Calculate volume-based features with symbol-specific thresholds"""
+        features = {}
+        
+        try:
+            if len(volume) < 20:
+                return {
+                    'volume_ma_20': 1.0,
+                    'volume_ratio': 1.0,
+                    'volume_trend': 0.0,
+                    'volume_volatility': 0.0,
+                    'volume_zscore': 0.0
+                }
+            
+            # Symbol-specific volume thresholds
+            if symbol in self.symbol_volatility_profiles:
+                profile = self.symbol_volatility_profiles[symbol]
+                if profile['volatility_tier'] in ['high', 'extreme']:
+                    # Higher thresholds for volatile symbols
+                    volume_spike_threshold = 3.0
+                    low_volume_threshold = 0.3
+                else:
+                    # Standard thresholds for stable symbols
+                    volume_spike_threshold = 2.5
+                    low_volume_threshold = 0.5
+            else:
+                volume_spike_threshold = 2.5
+                low_volume_threshold = 0.5
+            
+            # Volume moving averages
+            volume_ma_20 = volume.rolling(20).mean().iloc[-1]
+            volume_ma_50 = volume.rolling(50).mean().iloc[-1]
+            
+            # Current volume ratios
+            current_volume = volume.iloc[-1]
+            volume_ratio_20 = current_volume / volume_ma_20 if volume_ma_20 > 0 else 1.0
+            volume_ratio_50 = current_volume / volume_ma_50 if volume_ma_50 > 0 else 1.0
+            
+            # Volume trend (slope of linear regression)
+            if len(volume) >= 20:
+                x = np.arange(len(volume.tail(20)))
+                y = volume.tail(20).values
+                volume_trend = np.polyfit(x, y, 1)[0] / np.mean(y) if np.mean(y) > 0 else 0.0
+            else:
+                volume_trend = 0.0
+            
+            # Volume volatility (coefficient of variation)
+            volume_volatility = volume.rolling(20).std().iloc[-1] / volume_ma_20 if volume_ma_20 > 0 else 0.0
+            
+            # Volume z-score (how extreme is current volume)
+            volume_zscore = (current_volume - volume_ma_20) / volume.rolling(20).std().iloc[-1] if volume.rolling(20).std().iloc[-1] > 0 else 0.0
+            
+            # Volume regime detection
+            volume_regime = 0
+            if volume_ratio_20 > volume_spike_threshold:
+                volume_regime = 1  # High volume regime
+            elif volume_ratio_20 < low_volume_threshold:
+                volume_regime = -1  # Low volume regime
+            
+            features = {
+                'volume_ma_20': volume_ma_20,
+                'volume_ratio_20': volume_ratio_20,
+                'volume_ratio_50': volume_ratio_50,
+                'volume_trend': volume_trend,
+                'volume_volatility': volume_volatility,
+                'volume_zscore': volume_zscore,
+                'volume_regime': volume_regime,
+                'volume_above_average': 1 if volume_ratio_20 > 1.0 else 0
+            }
+            
+            # Add symbol-specific volume features
+            if symbol in ['BTCUSDT', 'ETHUSDT']:
+                # Institutional volume patterns for large caps
+                features['volume_consistency'] = volume.rolling(10).std().iloc[-1] / volume_ma_20 if volume_ma_20 > 0 else 0.0
+            elif symbol in ['XRPUSDT', 'DOGEUSDT']:
+                # Retail volume patterns for meme coins
+                features['volume_spikiness'] = (volume_ratio_20 > 2.0) * 1.0
+            
+            return features
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating volume profile for {symbol}: {e}")
+            return {
+                'volume_ma_20': 1.0,
+                'volume_ratio_20': 1.0,
+                'volume_ratio_50': 1.0,
+                'volume_trend': 0.0,
+                'volume_volatility': 0.0,
+                'volume_zscore': 0.0,
+                'volume_regime': 0,
+                'volume_above_average': 0
+            }
+
+    def _get_market_cap_tier(self, symbol: str) -> int:
+        """Categorize symbols by market cap tier - returns numerical value"""
+        large_cap = ['BTCUSDT', 'ETHUSDT']
+        mid_cap = ['BNBUSDT', 'SOLUSDT']
+        small_cap = ['XRPUSDT', 'DOGEUSDT']
+        
+        if symbol in large_cap:
+            return 2  # large_cap
+        elif symbol in mid_cap:
+            return 1  # mid_cap
+        else:
+            return 0  # small_cap
+
+    def _calculate_advanced_features(self, close, high, low, volume):
+        """Advanced features for large-cap symbols"""
+        features = {}
+        
+        # Hurst exponent, microstructure, etc.
+        if len(close) >= 100:
+            features['hurst_exponent'] = self._calculate_hurst_exponent(close.tail(100))
+            features['market_micro_1'] = self._calculate_market_microstructure_1(high, low, close, volume)
+        
+        return features
+
+    def _calculate_price_volume_correlation(self, close_prices: pd.Series, volume: pd.Series, window: int = 20) -> float:
+        """Calculate correlation between price changes and volume"""
+        try:
+            if len(close_prices) < window + 1:
+                return 0.0
+            
+            # Calculate price returns and volume changes
+            price_returns = close_prices.pct_change().dropna()
+            volume_changes = volume.pct_change().dropna()
+            
+            # Align the series
+            common_index = price_returns.index.intersection(volume_changes.index)
+            if len(common_index) < window:
+                return 0.0
+            
+            price_aligned = price_returns.loc[common_index]
+            volume_aligned = volume_changes.loc[common_index]
+            
+            # Calculate rolling correlation
+            correlation = price_aligned.rolling(window).corr(volume_aligned)
+            
+            return correlation.iloc[-1] if not pd.isna(correlation.iloc[-1]) else 0.0
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating price-volume correlation: {e}")
+            return 0.0
+
+    def _calculate_medium_complexity_features(self, close, high, low, volume):
+        """Medium complexity features for mid-cap symbols"""
+        features = {}
+        
+        # Basic indicators + volume features
+        features['volume_momentum'] = volume.iloc[-1] / volume.rolling(10).mean().iloc[-1] if len(volume) > 10 else 1
+        features['price_volume_corr'] = self._calculate_price_volume_correlation(close, volume)
+        
+        return features
+
+    def _calculate_simple_features(self, close, high, low, volume):
+        """Simple features for small-cap/volatile symbols"""
+        features = {}
+        
+        # Only essential features to avoid overfitting
+        for period in [5, 10, 20]:
+            if len(close) > period:
+                features[f'returns_{period}'] = close.iloc[-1] / close.iloc[-period-1] - 1
+        
+        features['rsi_14'] = self._calculate_rsi_point_in_time(close, 14)
+        features['atr_14'] = self._calculate_atr_point_in_time(high, low, close, 14)
+        
+        return features
+
+    def create_multi_timeframe_targets(self, df: pd.DataFrame, current_idx: int, target_configs: List[Dict] = None) -> List[int]:
         """Create multi-timeframe targets for richer learning"""
+        if target_configs is None:
+            target_configs = self.target_configs
+            
         targets = []
         
-        for config in self.target_configs:
+        for config in target_configs:
             periods = config['periods']
             threshold_multiplier = config['threshold_multiplier']
             
@@ -338,14 +618,24 @@ class MLPredictor:
         
         return targets
 
-    def create_enhanced_target(self, df: pd.DataFrame, current_idx: int) -> int:
-        """Create enhanced target using dynamic thresholds based on market regime"""
-        multi_targets = self.create_multi_timeframe_targets(df, current_idx)
+    def create_enhanced_target(self, df: pd.DataFrame, current_idx: int, symbol: str = None) -> int:
+        """Create symbol-specific enhanced targets"""
+        
+        # Get symbol-specific configuration
+        if symbol and symbol in self.symbol_volatility_profiles:
+            profile = self.symbol_volatility_profiles[symbol]
+            target_configs = self._get_symbol_specific_target_configs(symbol)
+        else:
+            # Fallback to default
+            target_configs = self.target_configs
+        
+        # Create multi-timeframe targets with symbol-specific configs
+        multi_targets = self.create_multi_timeframe_targets(df, current_idx, target_configs)
         
         if not multi_targets:
             return 0
         
-        # Get market regime context
+        # Get market regime context with symbol-specific adjustments
         close_prices = df['close'].astype(float)
         if current_idx >= 20:
             volatility = close_prices.pct_change().rolling(20).std().iloc[current_idx]
@@ -354,26 +644,19 @@ class MLPredictor:
             volatility = 0.02
             trend_strength = 0
         
-        # Weighted voting with regime consideration
+        # Symbol-specific threshold adjustments
+        base_thresholds = self._get_symbol_thresholds(symbol, volatility)
+        
+        # Weighted voting with symbol-specific considerations
         weighted_vote = 0
         total_weight = 0
         
         for i, target in enumerate(multi_targets):
-            base_weight = self.target_configs[i]['weight']
+            base_weight = target_configs[i]['weight']
             
-            # Adjust weights based on market regime
-            adjusted_weight = base_weight
-            
-            # Increase weight for shorter timeframes in trending markets
-            if trend_strength > 0.04 and self.target_configs[i]['periods'] <= 10:
-                adjusted_weight *= 1.3
-            # Increase weight for medium timeframes in high volatility
-            elif volatility > 0.03 and 10 <= self.target_configs[i]['periods'] <= 20:
-                adjusted_weight *= 1.2
-            # Decrease weight for all timeframes in low volatility ranging markets
-            elif volatility < 0.01 and trend_strength < 0.02:
-                adjusted_weight *= 0.7
-                
+            # Adjust weights based on symbol type and market regime
+            adjusted_weight = self._adjust_target_weight(base_weight, symbol, trend_strength, volatility)
+                    
             weighted_vote += target * adjusted_weight
             total_weight += adjusted_weight
         
@@ -382,16 +665,9 @@ class MLPredictor:
         else:
             normalized_vote = 0
         
-        # Convert to trading signal with regime-aware thresholds
-        if trend_strength > 0.05:  # Strong trend
-            strong_threshold = 0.25
-            weak_threshold = 0.15
-        elif volatility > 0.03:  # High volatility
-            strong_threshold = 0.30
-            weak_threshold = 0.20
-        else:  # Normal conditions
-            strong_threshold = 0.20
-            weak_threshold = 0.10
+        # Convert to trading signal with symbol-specific thresholds
+        strong_threshold = base_thresholds['strong']
+        weak_threshold = base_thresholds['weak']
         
         if normalized_vote > strong_threshold:
             return 2  # Strong buy
@@ -404,7 +680,63 @@ class MLPredictor:
         else:
             return 0  # Hold
 
-    def prepare_training_data_enhanced(self, df: pd.DataFrame, min_samples: int = None) -> tuple:
+    def _get_symbol_specific_target_configs(self, symbol: str) -> List[Dict]:
+        """Get symbol-specific target configurations"""
+        if symbol in self.symbol_volatility_profiles:
+            profile = self.symbol_volatility_profiles[symbol]
+            periods = profile['timeframes']
+            multiplier = profile['multiplier']
+        else:
+            periods = [5, 10, 20]
+            multiplier = 2.0
+        
+        # Create configs based on available periods
+        weights = [0.4, 0.3, 0.3] if len(periods) == 3 else [0.6, 0.4] if len(periods) == 2 else [1.0]
+        
+        configs = []
+        for i, period in enumerate(periods):
+            configs.append({
+                'periods': period,
+                'weight': weights[i] if i < len(weights) else 1.0/len(periods),
+                'threshold_multiplier': multiplier * (1 + i * 0.2)  # Increase multiplier for longer timeframes
+            })
+        
+        return configs
+
+    def _get_symbol_thresholds(self, symbol: str, volatility: float) -> Dict[str, float]:
+        """Get symbol-specific decision thresholds"""
+        base_strong = 0.20
+        base_weak = 0.10
+        
+        if symbol in self.symbol_volatility_profiles:
+            profile = self.symbol_volatility_profiles[symbol]
+            if profile['volatility_tier'] == 'low':
+                # Tighter thresholds for BTC
+                strong_threshold = base_strong * 0.8
+                weak_threshold = base_weak * 0.8
+            elif profile['volatility_tier'] == 'extreme':
+                # Wider thresholds for DOGE/SOL
+                strong_threshold = base_strong * 1.5
+                weak_threshold = base_weak * 1.5
+            else:
+                # Moderate adjustments
+                strong_threshold = base_strong
+                weak_threshold = base_weak
+        else:
+            strong_threshold = base_strong
+            weak_threshold = base_weak
+        
+        # Adjust for current volatility
+        vol_adjustment = 1.0 + (volatility - 0.02) * 10  # Scale adjustment
+        strong_threshold *= vol_adjustment
+        weak_threshold *= vol_adjustment
+        
+        return {
+            'strong': max(0.15, min(0.35, strong_threshold)),
+            'weak': max(0.05, min(0.25, weak_threshold))
+        }
+
+    def prepare_training_data_enhanced(self, df: pd.DataFrame, min_samples: int = None, symbol: str = None) -> tuple:
         """Enhanced training data preparation with multi-timeframe targets"""
         if min_samples is None:
             min_samples = self.min_training_samples
@@ -422,8 +754,8 @@ class MLPredictor:
         stride = max(1, len(df) // 500)
         
         for i in range(50, len(df) - max([c['periods'] for c in self.target_configs]), stride):
-            features = self.prepare_features_point_in_time(df, i)
-            target = self.create_enhanced_target(df, i)
+            features = self.prepare_features_point_in_time(df, i, symbol=symbol)  # Pass symbol here
+            target = self.create_enhanced_target(df, i, symbol)  # Pass symbol here
             
             if not features.empty:
                 features_list.append(features.iloc[0])
@@ -504,10 +836,22 @@ class MLPredictor:
             print(f"⚠️ Hyperparameter optimization failed: {e}")
             return self.rf_params, self.gb_params
 
+    def _get_symbol_specific_parameters(self, symbol: str, X_train_scaled: np.ndarray, y_train: pd.Series) -> Tuple[dict, dict]:
+        """Get symbol-specific model parameters"""
+        if symbol in self.symbol_model_complexity and self.symbol_model_complexity[symbol].get('enable_hpo', False):
+            # Use hyperparameter optimization for complex models
+            return self._optimize_hyperparameters(X_train_scaled, y_train)
+        else:
+            # Use default parameters for simple models
+            return self.rf_params.copy(), self.gb_params.copy()
+
     def train_model(self, symbol: str, df: pd.DataFrame) -> bool:
-        """Enhanced model training with hyperparameter optimization and multi-timeframe targets"""
+        """Enhanced training with symbol-specific configuration"""
         try:
-            print(f"🔄 Training enhanced model for {symbol}...")
+            print(f"🔄 Training symbol-specific model for {symbol}...")
+            
+            # Set symbol-specific configuration
+            self._apply_symbol_specific_config(symbol)
             
             training_start = datetime.now()
             
@@ -520,19 +864,27 @@ class MLPredictor:
                 self.previous_scalers[symbol] = self.scalers[symbol]
                 print(f"💾 Saved previous model for {symbol} for ensembling")
             
-            # Use enhanced training data with multi-timeframe targets
-            features, target = self.prepare_training_data_enhanced(df)
+            # Use enhanced training data with symbol-specific targets
+            features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
             
             if features.empty or target.empty:
                 print(f"⚠️ Insufficient data for training {symbol}")
                 self._record_training_failure(symbol, "insufficient_data")
                 return False
                 
-            # Enhanced feature selection
+            # Apply symbol-specific feature selection
             features_selected, selected_features = self._select_features(features, target, symbol)
             self.feature_importance[symbol]['selected_features'] = selected_features
             
-            X_train, X_test, y_train, y_test = self.time_series_train_test_split(features_selected, target)
+            # Filter training data by market regime
+            filtered_features, filtered_target = self._filter_training_data_by_regime(features_selected, target, df, symbol)
+            
+            if filtered_features.empty or filtered_target.empty:
+                print(f"⚠️ Insufficient tradable regime data for {symbol}")
+                self._record_training_failure(symbol, "insufficient_tradable_data")
+                return False
+            
+            X_train, X_test, y_train, y_test = self.time_series_train_test_split(filtered_features, filtered_target)
             
             if X_train is None:
                 print(f"⚠️ Insufficient data after split for {symbol}")
@@ -544,12 +896,8 @@ class MLPredictor:
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
             
-            # Apply PCA if enabled
-            if self.use_pca:
-                X_train_scaled, X_test_scaled = self._apply_pca(X_train_scaled, X_test_scaled)
-
-            # Hyperparameter optimization
-            rf_params, gb_params = self._optimize_hyperparameters(X_train_scaled, y_train)
+            # Apply symbol-specific model complexity
+            rf_params, gb_params = self._get_symbol_specific_parameters(symbol, X_train_scaled, y_train)
             
             # Train models with optimized parameters
             rf = RandomForestClassifier(**rf_params)
@@ -558,7 +906,7 @@ class MLPredictor:
             rf.fit(X_train_scaled, y_train)
             gb.fit(X_train_scaled, y_train)
 
-            # Enhanced validation with multi-class metrics
+            # Enhanced validation with symbol-specific metrics
             rf_pred = rf.predict(X_test_scaled)
             gb_pred = gb.predict(X_test_scaled)
 
@@ -684,7 +1032,7 @@ class MLPredictor:
                     print(f"📊 Enhanced walk-forward validation for {symbol}: {wf_result['avg_accuracy']:.3f} ± {wf_result['std_accuracy']:.3f}")
             except Exception as wf_error:
                 print(f"⚠️ Walk-forward validation failed for {symbol}: {wf_error}")
-            
+                        
             return True
         
         except Exception as e:
@@ -702,6 +1050,130 @@ class MLPredictor:
             
             self._record_training_failure(symbol, f"error: {str(e)[:100]}")
             return False
+
+    def _apply_symbol_specific_config(self, symbol: str):
+        """Apply symbol-specific configuration"""
+        if symbol in self.symbol_model_complexity:
+            config = self.symbol_model_complexity[symbol]
+            self.max_features = config['max_features']
+            self.enable_hyperparameter_optimization = config['enable_hpo']
+            
+            # Adjust model parameters based on complexity
+            if config['model_depth'] == 'deep':
+                self.rf_params['n_estimators'] = 150
+                self.rf_params['max_depth'] = 12
+            elif config['model_depth'] == 'simple':
+                self.rf_params['n_estimators'] = 80
+                self.rf_params['max_depth'] = 6
+            # medium keeps default values
+        else:
+            # Default configuration for unknown symbols
+            self.max_features = 20
+            self.enable_hyperparameter_optimization = False
+
+    def _filter_training_data_by_regime(self, features: pd.DataFrame, target: pd.Series, 
+                                    df: pd.DataFrame, symbol: str) -> Tuple[pd.DataFrame, pd.Series]:
+        """Filter training data to only include tradable market regimes"""
+        try:
+            # Use technical analyzer to detect regimes for each training point
+            tradable_indices = []
+            
+            for i in range(len(features)):
+                if i < 50:  # Need enough data for regime detection
+                    continue
+                    
+                # Get historical data up to this point
+                historical_window = df.iloc[:i+1]
+                if len(historical_window) < 100:
+                    continue
+                    
+                # Detect market regime
+                regime = self._detect_training_regime(historical_window, symbol)
+                
+                # Only include data from tradable regimes
+                if regime in ['bull_trend', 'bear_trend', 'neutral']:
+                    tradable_indices.append(i)
+            
+            if len(tradable_indices) > self.min_training_samples:
+                return features.iloc[tradable_indices], target.iloc[tradable_indices]
+            else:
+                # Fallback: use all data if not enough tradable samples
+                return features, target
+                
+        except Exception as e:
+            self.logger.error(f"Error filtering training data by regime for {symbol}: {e}")
+            return features, target  # Fallback to all data
+
+    def _calculate_trend_strength(self, close_prices: pd.Series, period: int = 20) -> float:
+        """Calculate trend strength using linear regression slope"""
+        try:
+            if len(close_prices) < period:
+                return 0.0
+            
+            # Use linear regression to determine trend strength
+            x = np.arange(len(close_prices.tail(period)))
+            y = close_prices.tail(period).values
+            
+            # Handle NaN values
+            mask = ~np.isnan(y)
+            if np.sum(mask) < 2:
+                return 0.0
+                
+            x_clean = x[mask]
+            y_clean = y[mask]
+            
+            if len(x_clean) < 2:
+                return 0.0
+                
+            slope, intercept = np.polyfit(x_clean, y_clean, 1)
+            
+            # Normalize slope by average price to get relative strength
+            avg_price = np.mean(y_clean)
+            if avg_price == 0:
+                return 0.0
+                
+            trend_strength = slope / avg_price
+            
+            # Scale to reasonable range and cap
+            return max(-1.0, min(1.0, trend_strength * 100))
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating trend strength: {e}")
+            return 0.0
+
+    def _detect_training_regime(self, df: pd.DataFrame, symbol: str) -> str:
+        """Detect market regime for training data filtering"""
+        try:
+            close = df['close'].astype(float)
+            returns = close.pct_change().dropna()
+            
+            if len(returns) < 20:
+                return 'neutral'
+            
+            volatility = returns.rolling(20).std().iloc[-1]
+            trend_strength = self._calculate_trend_strength(close)
+            
+            # Symbol-specific regime detection
+            if symbol in self.symbol_volatility_profiles:
+                profile = self.symbol_volatility_profiles[symbol]
+                vol_threshold_high = 0.04 if profile['volatility_tier'] == 'low' else 0.06
+                vol_threshold_low = 0.015 if profile['volatility_tier'] == 'low' else 0.025
+            else:
+                vol_threshold_high = 0.05
+                vol_threshold_low = 0.02
+            
+            if volatility > vol_threshold_high:
+                return 'high_volatility'
+            elif volatility < vol_threshold_low and trend_strength < 0.3:
+                return 'ranging'
+            elif trend_strength > 0.5:
+                return 'bull_trend' if close.iloc[-1] > close.iloc[-20] else 'bear_trend'
+            else:
+                return 'neutral'
+                
+        except Exception as e:
+            self.logger.error(f"Error detecting training regime for {symbol}: {e}")
+            return 'neutral'
 
     def walk_forward_validation_enhanced(self, symbol: str, df: pd.DataFrame, n_splits: int = None) -> Dict:
         """Enhanced walk-forward validation with multi-timeframe targets"""
@@ -817,35 +1289,37 @@ class MLPredictor:
             return {'success': False, 'reason': str(e)}
 
     def predict_enhanced(self, symbol: str, df: pd.DataFrame) -> Dict:
-        """Enhanced prediction with robust data validation"""
+        """Enhanced prediction with symbol-specific confidence calibration"""
         if symbol not in self.models:
             return self.fallback_prediction_strategy(symbol, df)
             
         try:
-            # --- DATA VALIDATION ---
+            # Apply symbol-specific configuration
+            self._apply_symbol_specific_config(symbol)
+            
+            # Data validation with symbol-specific checks
             if df is None or len(df) < 50:
                 self.logger.warning(f"Insufficient data for {symbol}: {len(df) if df is not None else 0} rows")
                 return self.fallback_prediction_strategy(symbol, df)
                 
-            # Check for valid close prices
+            # Check for valid close prices with symbol-specific validation
             close_prices = df['close'].astype(float)
             if close_prices.isnull().all() or (close_prices == 0).all():
                 self.logger.warning(f"Invalid close prices for {symbol} ML prediction")
                 return self.fallback_prediction_strategy(symbol, df)
             
-            if len(df) < 50:
+            # Symbol-specific data quality checks
+            if not self._validate_symbol_data_quality(df, symbol):
+                self.logger.warning(f"Poor data quality for {symbol}, using fallback")
                 return self.fallback_prediction_strategy(symbol, df)
-                
-            features = self.prepare_features_point_in_time(df, len(df)-1)
+            
+            # Prepare features with symbol-specific configuration
+            features = self.prepare_features_point_in_time(df, len(df)-1, symbol=symbol)
             
             if features.empty:
                 return self.fallback_prediction_strategy(symbol, df)
             
-            # === FIX: Initialize variables first ===
-            selected_features = []
-            features_selected = features
-            
-            # Apply feature selection
+            # Apply symbol-specific feature selection
             selected_features = self.feature_importance.get(symbol, {}).get('selected_features', [])
             if selected_features:
                 missing_features = set(selected_features) - set(features.columns)
@@ -857,119 +1331,161 @@ class MLPredictor:
                 else:
                     features_selected = features[selected_features]
             else:
-                # If no selected features available, use all features
                 features_selected = features
-                selected_features = features.columns.tolist()
             
-            if not self.validate_feature_consistency(symbol, features):
+            # Validate feature consistency
+            if not self.validate_feature_consistency(symbol, features_selected):
                 self.logger.warning(f"Feature consistency check failed for {symbol}, using fallback")
                 return self.fallback_prediction_strategy(symbol, df)
 
-            # === FIX: Ensure features_selected is defined for ensemble ===
-            drift_result = self.detect_feature_drift(symbol, features_selected)
-                
+            # Scale features
             scaled_features = self.scalers[symbol].transform(features_selected)
 
-            # Get predictions with enhanced confidence measures
+            # Get predictions
             rf_pred = self.models[symbol]['rf'].predict(scaled_features)[0]
             gb_pred = self.models[symbol]['gb'].predict(scaled_features)[0]
 
             rf_proba = self.models[symbol]['rf'].predict_proba(scaled_features)[0]
             gb_proba = self.models[symbol]['gb'].predict_proba(scaled_features)[0]
 
-            rf_confidence = max(rf_proba)
-            gb_confidence = max(gb_proba)
+            # Symbol-specific confidence calibration
+            rf_confidence = self._calibrate_confidence_symbol(rf_proba, rf_pred, symbol)
+            gb_confidence = self._calibrate_confidence_symbol(gb_proba, gb_pred, symbol)
             
-            # Enhanced confidence calibration
-            rf_confidence_calibrated = self._calibrate_confidence(rf_proba, rf_pred)
-            gb_confidence_calibrated = self._calibrate_confidence(gb_proba, gb_pred)
+            # Apply symbol-specific confidence thresholds
+            min_confidence = self._get_symbol_min_confidence(symbol)
+            if rf_confidence < min_confidence and gb_confidence < min_confidence:
+                self.logger.info(f"Low confidence for {symbol} (RF: {rf_confidence:.2f}, GB: {gb_confidence:.2f}), using fallback")
+                return self.fallback_prediction_strategy(symbol, df)
 
-            # Ensemble with previous model if available
-            ensemble_used = False
-            if symbol in self.previous_models:
-                try:
-                    # === FIX: Use the already defined features_selected ===
-                    previous_scaled_features = self.previous_scalers[symbol].transform(features_selected)
-                    previous_rf_pred = self.previous_models[symbol]['rf'].predict(previous_scaled_features)[0]
-                    previous_gb_pred = self.previous_models[symbol]['gb'].predict(previous_scaled_features)[0]
-                    
-                    previous_rf_proba = self.previous_models[symbol]['rf'].predict_proba(previous_scaled_features)[0]
-                    previous_gb_proba = self.previous_models[symbol]['gb'].predict_proba(previous_scaled_features)[0]
-                    
-                    previous_rf_confidence = max(previous_rf_proba)
-                    previous_gb_confidence = max(previous_gb_proba)
-                    
-                    # Enhanced blending with calibrated confidence
-                    rf_pred = self._blend_predictions_enhanced(rf_pred, previous_rf_pred, rf_confidence_calibrated, previous_rf_confidence)
-                    gb_pred = self._blend_predictions_enhanced(gb_pred, previous_gb_pred, gb_confidence_calibrated, previous_gb_confidence)
-                    
-                    # Blend confidences
-                    rf_confidence = (rf_confidence_calibrated * self.ensemble_weight_current + 
-                                previous_rf_confidence * self.ensemble_weight_previous)
-                    gb_confidence = (gb_confidence_calibrated * self.ensemble_weight_current + 
-                                previous_gb_confidence * self.ensemble_weight_previous)
-                    
-                    ensemble_used = True
-                except Exception as e:
-                    print(f"⚠️ Error using previous model ensemble for {symbol}: {e}")
+            # Ensemble decision making with symbol-specific weights
+            ensemble_vote, ensemble_confidence = self._symbol_specific_ensemble(
+                rf_pred, gb_pred, rf_confidence, gb_confidence, symbol
+            )
 
-            # Enhanced ensemble decision making
-            if rf_pred == gb_pred:
-                ensemble_vote = rf_pred
-                confidence = (rf_confidence + gb_confidence) / 2
-            else:
-                # Consider the strength of prediction (distance from decision boundary)
-                rf_strength = abs(rf_proba[1] - rf_proba[0]) if len(rf_proba) > 1 else rf_confidence
-                gb_strength = abs(gb_proba[1] - gb_proba[0]) if len(gb_proba) > 1 else gb_confidence
-                
-                if rf_strength > gb_strength:
-                    ensemble_vote = rf_pred
-                    confidence = rf_confidence
-                else:
-                    ensemble_vote = gb_pred
-                    confidence = gb_confidence
-
-            # Convert enhanced targets to trading signals
+            # Convert to trading signal
             trading_signal = self._convert_to_trading_signal(ensemble_vote)
             
             result = {
                 'prediction': trading_signal,
                 'raw_prediction': ensemble_vote,
-                'confidence': confidence,
+                'confidence': ensemble_confidence,
                 'rf_pred': rf_pred,
                 'gb_pred': gb_pred,
                 'rf_confidence': rf_confidence,
                 'gb_confidence': gb_confidence,
                 'timestamp': datetime.now(),
-                'model_used': 'ml_ensemble_enhanced',
-                'feature_drift': drift_result,
-                'quality_metrics': self._get_current_quality_metrics(symbol),
-                'ensemble_used': ensemble_used,
-                'training_bars_used': self.model_versions.get(symbol, {}).get('training_bars_used', 0),
-                'feature_count_used': len(selected_features) if selected_features else len(features.columns),
-                'target_type': 'multi_timeframe_enhanced'
+                'model_used': 'ml_ensemble_enhanced_symbol_specific',
+                'symbol_specific_config': True,
+                'min_confidence_threshold': min_confidence
             }
             
+            # Store prediction quality with symbol context
             if self.database:
                 self.database.store_prediction_quality(
                     symbol=symbol,
                     prediction=trading_signal,
                     actual=None,
-                    confidence=confidence,
-                    model_used='ml_ensemble_enhanced',
+                    confidence=ensemble_confidence,
+                    model_used='ml_ensemble_enhanced_symbol_specific',
                     features_used=selected_features if selected_features else features.columns.tolist(),
-                    ensemble_used=ensemble_used,
-                    feature_count=len(selected_features) if selected_features else len(features.columns),
-                    raw_prediction=ensemble_vote
+                    symbol_volatility_tier=self.symbol_volatility_profiles.get(symbol, {}).get('volatility_tier', 'unknown'),
+                    market_cap_tier=self._get_market_cap_tier(symbol)
                 )
-            
-            self._update_real_time_monitoring(symbol, result)
             
             return result
             
         except Exception as e:
             print(f"❌ Prediction error for {symbol}: {e}")
             return self.fallback_prediction_strategy(symbol, df)
+
+    def _calibrate_confidence_symbol(self, probabilities: np.ndarray, prediction: int, symbol: str) -> float:
+        """Symbol-specific confidence calibration"""
+        base_confidence = self._calibrate_confidence(probabilities, prediction)
+        
+        # Apply symbol-specific adjustments
+        if symbol in self.symbol_volatility_profiles:
+            profile = self.symbol_volatility_profiles[symbol]
+            if profile['volatility_tier'] in ['high', 'extreme']:
+                # Reduce confidence for volatile symbols
+                base_confidence *= 0.8
+            elif profile['volatility_tier'] == 'low':
+                # Boost confidence for stable symbols
+                base_confidence = min(1.0, base_confidence * 1.1)
+        
+        return base_confidence
+
+    def _get_symbol_min_confidence(self, symbol: str) -> float:
+        """Get symbol-specific minimum confidence threshold"""
+        if symbol in self.symbol_volatility_profiles:
+            profile = self.symbol_volatility_profiles[symbol]
+            if profile['volatility_tier'] == 'low':
+                return 0.55  # Lower threshold for BTC
+            elif profile['volatility_tier'] == 'extreme':
+                return 0.75  # Higher threshold for DOGE/SOL
+            else:
+                return 0.65  # Medium threshold
+        return 0.60  # Default
+
+    def _symbol_specific_ensemble(self, rf_pred: int, gb_pred: int, 
+                                rf_confidence: float, gb_confidence: float, 
+                                symbol: str) -> Tuple[int, float]:
+        """Symbol-specific ensemble decision making"""
+        
+        # Base ensemble logic
+        if rf_pred == gb_pred:
+            ensemble_vote = rf_pred
+            confidence = (rf_confidence + gb_confidence) / 2
+        else:
+            # Consider prediction strength
+            if rf_confidence > gb_confidence:
+                ensemble_vote = rf_pred
+                confidence = rf_confidence
+            else:
+                ensemble_vote = gb_pred
+                confidence = gb_confidence
+        
+        # Symbol-specific adjustments
+        if symbol in self.symbol_model_complexity:
+            config = self.symbol_model_complexity[symbol]
+            if config['model_depth'] == 'simple':
+                # For simple models, be more conservative
+                if confidence < 0.7:
+                    ensemble_vote = 0  # Force hold on low confidence
+                    confidence = max(confidence, 0.5)
+        
+        return ensemble_vote, confidence
+
+    def _validate_symbol_data_quality(self, df: pd.DataFrame, symbol: str) -> bool:
+        """Symbol-specific data quality validation"""
+        try:
+            close_prices = df['close'].astype(float)
+            volume = df['volume'].astype(float)
+            
+            # Check for sufficient price movement
+            price_range = (close_prices.max() - close_prices.min()) / close_prices.mean()
+            if price_range < 0.005:  # Less than 0.5% movement
+                self.logger.warning(f"Low price movement for {symbol}: {price_range:.4f}")
+                return False
+            
+            # Check volume requirements
+            avg_volume = volume.mean()
+            if symbol in ['XRPUSDT', 'DOGEUSDT'] and avg_volume < 1000000:  # Lower threshold for small caps
+                self.logger.warning(f"Low volume for {symbol}: {avg_volume:.0f}")
+                return False
+            
+            # Check for extreme volatility spikes
+            returns = close_prices.pct_change().dropna()
+            max_daily_move = returns.abs().max()
+            if max_daily_move > 0.15:  # Filter 15%+ daily moves
+                self.logger.warning(f"Extreme volatility spike for {symbol}: {max_daily_move:.4f}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error validating data quality for {symbol}: {e}")
+            return True  # Allow proceeding on error
 
     def _calibrate_confidence(self, probabilities: np.ndarray, prediction: int) -> float:
         """Calibrate confidence based on probability distribution"""

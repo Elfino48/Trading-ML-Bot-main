@@ -3,6 +3,7 @@ import logging
 import os
 
 from scipy import stats
+from config import RiskConfig
 from enhanced_technical_analyzer import EnhancedTechnicalAnalyzer
 from ml_predictor import MLPredictor
 from advanced_risk_manager import AdvancedRiskManager
@@ -1192,7 +1193,6 @@ class EnhancedStrategyOrchestrator:
             'analysis_price': 0.0 # Will be updated
         }
 
-
         quality_report = self._check_data_quality(symbol, historical_data)
         if not quality_report['is_usable']:
             self.logger.error(f"Data quality issues for {symbol}: {quality_report['data_issues']}")
@@ -1204,7 +1204,6 @@ class EnhancedStrategyOrchestrator:
             except: pass
             self._log_cycle_details(error_fallback)
             return error_fallback
-
 
         indicators = {} # Define indicators dict outside try block for scope in except/finally
         analysis_price = 0.0 # Define analysis_price outside try block
@@ -1247,25 +1246,15 @@ class EnhancedStrategyOrchestrator:
             indicators['analysis_price'] = analysis_price
             indicators['close'] = analysis_price
 
+            # ========== VOLUME FILTER MODIFICATION START ==========
+            # Check volume but don't return early - just note the warning
             volume_ok, volume_reason = self._should_trade_with_volume(indicators)
+            volume_warning = None
             if not volume_ok:
-                self.logger.warning(f"[{symbol}] Volume filter triggered HOLD: {volume_reason}")
-                # --- CORRECTED FALLBACK CREATION ---
-                volume_fallback = base_fallback.copy() # Start fresh
-                volume_fallback['action'] = 'HOLD'
-                volume_fallback['analysis_notes'] = f'Volume filter: {volume_reason}'
-                volume_fallback['confidence'] = 0
-                volume_fallback['composite_score'] = 0 # Explicitly zero
-                # Populate with calculated data
-                volume_fallback['technical_indicators'] = indicators
-                volume_fallback['timestamp'] = pd.Timestamp.now()
-                volume_fallback['current_price'] = self.data_engine.get_current_price(symbol)
-                volume_fallback['analysis_price'] = analysis_price # Use the VALID analysis price
-                # Keep other scores/SL/TP etc as zero/default from base_fallback
-                self._log_cycle_details(volume_fallback)
-                return volume_fallback
-                # --- END CORRECTED FALLBACK ---
-
+                self.logger.warning(f"[{symbol}] Volume warning: {volume_reason}")
+                volume_warning = volume_reason
+                # We continue with analysis but will block execution later
+            # ========== VOLUME FILTER MODIFICATION END ==========
 
             signals = self.technical_analyzer.generate_enhanced_signals(indicators)
             ml_result = self.ml_predictor.predict(symbol, historical_data)
@@ -1311,7 +1300,6 @@ class EnhancedStrategyOrchestrator:
             else:
                 sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
 
-
             market_context = self._analyze_market_context(indicators, historical_data)
             trade_quality = self._assess_signal_quality_enhanced(indicators, signals, ml_result, action, composite_score)
 
@@ -1348,15 +1336,26 @@ class EnhancedStrategyOrchestrator:
                 }
             }
 
-
             decision = self._apply_regime_aware_filters(decision, indicators)
 
-
-            should_execute, execute_reason = self._should_execute_trade(decision)
-
-
-            decision['should_execute'] = should_execute
-            decision['execute_reason'] = execute_reason
+            # ========== VOLUME FILTER EXECUTION BLOCK START ==========
+            # Apply volume filter to block execution while still showing the analysis
+            if volume_warning and decision['action'] != 'HOLD':
+                original_action = decision['action']
+                decision['action'] = 'HOLD'
+                decision['execute_reason'] = f"Volume filter: {volume_warning} (would have been {original_action})"
+                decision['should_execute'] = False
+                # Reduce confidence for low volume scenarios
+                decision['confidence'] = decision['confidence'] * 0.3
+                if 'weaknesses' not in decision['trade_quality']:
+                    decision['trade_quality']['weaknesses'] = []
+                decision['trade_quality']['weaknesses'].append(f"Low volume: {volume_warning}")
+            else:
+                # Normal execution logic for volume-ok scenarios
+                should_execute, execute_reason = self._should_execute_trade(decision)
+                decision['should_execute'] = should_execute
+                decision['execute_reason'] = execute_reason
+            # ========== VOLUME FILTER EXECUTION BLOCK END ==========
 
             self._log_cycle_details(decision)
 
@@ -2571,18 +2570,18 @@ class EnhancedStrategyOrchestrator:
         try:
             valid_levels = ["conservative", "moderate", "aggressive", "high"]
             if new_aggressiveness not in valid_levels:
-                raise ValueError(f"Invalid aggressiveness level. Must be one of: {valid_levels}")
+                print(f"❌ Invalid aggressiveness level. Must be one of: {valid_levels}")
+                return False
                 
             old_level = self.aggressiveness
             self.aggressiveness = new_aggressiveness
-            self._set_aggressiveness_weights()
             self.risk_manager.aggressiveness = new_aggressiveness
-            self.risk_manager._set_aggressiveness_parameters()
+            self.risk_manager.config = RiskConfig.get_config(new_aggressiveness)
+            self.risk_manager._set_parameters_from_config()
             
             print(f"🔄 Strategy aggressiveness changed from {old_level.upper()} to {new_aggressiveness.upper()}")
             
-            if self.database:
-                self.database.store_system_event(
+            self.database.store_system_event(
                     "AGGRESSIVENESS_CHANGED",
                     {
                         'old_level': old_level,

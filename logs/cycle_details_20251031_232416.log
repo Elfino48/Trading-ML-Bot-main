@@ -1,0 +1,1002 @@
+============================================================
+CYCLE DECISION LOG: BTCUSDT
+Timestamp: 2025-10-31 23:26:43.640667
+Aggressiveness: moderate
+Crypto Regime: N/A | On-Chain: N/A | F&G: N/A
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 109542.7000
+  - atr                      : 330.7643
+  - atr_percent              : 0.3020
+  - bb_lower                 : 109094.7052
+  - bb_middle                : 109506.2000
+  - bb_position              : 0.5444
+  - bb_upper                 : 109917.6948
+  - close                    : 109542.7000
+  - composite_momentum       : -17.9691
+  - ema_21                   : 109560.7181
+  - ema_34                   : 109591.8993
+  - ema_55                   : 109573.2294
+  - ema_8                    : 109537.1849
+  - ema_89                   : 109517.2144
+  - hma                      : 109501.2582
+  - is_anomaly               : False
+  - ma_alignment             : -1
+  - ma_alignment_strength    : 0.0165
+  - macd_momentum            : 16.0176
+  - macd_trend               : 1
+  - market_regime            : bear_trend
+  - momentum_regime          : bearish
+  - obv_trend                : 112.2067
+  - price_momentum_100       : 1.8032
+  - price_momentum_20        : 0.2888
+  - price_momentum_50        : -0.1707
+  - price_vs_high_20         : 0.9940
+  - price_vs_low_20          : 1.0059
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.5000
+  - resistance               : 110200.6000
+  - rsi_14                   : 49.1417
+  - rsi_21                   : 49.2918
+  - rsi_6                    : 50.5155
+  - rsi_momentum             : -0.1501
+  - rsi_trend                : -1
+  - sma_50                   : 109718.8100
+  - stoch_d                  : 47.2309
+  - stoch_k                  : 42.6267
+  - super_trend              : 109272.5400
+  - support                  : 108900.1000
+  - symbol                   : BTCUSDT
+  - volume                   : 115.7430
+  - volume_ratio             : 0.2328
+  - volume_sma_20            : 633.9535
+  - vwap_momentum            : -1.7536
+  - williams_r               : -57.3733
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 109542.7000
+Latest Price (For Execution): 109536.4000
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: ETHUSDT
+Timestamp: 2025-10-31 23:26:43.802241
+Aggressiveness: moderate
+Crypto Regime: N/A | On-Chain: N/A | F&G: N/A
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 3850.7800
+  - atr                      : 18.9936
+  - atr_percent              : 0.4932
+  - bb_lower                 : 3812.9363
+  - bb_middle                : 3855.9605
+  - bb_position              : 0.4398
+  - bb_upper                 : 3898.9847
+  - close                    : 3850.7800
+  - composite_momentum       : 21.2394
+  - ema_21                   : 3856.3461
+  - ema_34                   : 3853.6527
+  - ema_55                   : 3849.1022
+  - ema_8                    : 3857.0198
+  - ema_89                   : 3846.5880
+  - hma                      : 3856.9723
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.1028
+  - macd_momentum            : -1.7182
+  - macd_trend               : -1
+  - market_regime            : bull_trend
+  - momentum_regime          : bullish
+  - obv_trend                : 782.1090
+  - price_momentum_100       : 2.4383
+  - price_momentum_20        : 0.7493
+  - price_momentum_50        : 0.2528
+  - price_vs_high_20         : 0.9860
+  - price_vs_low_20          : 1.0116
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.5000
+  - resistance               : 3905.4500
+  - rsi_14                   : 48.1942
+  - rsi_21                   : 49.6524
+  - rsi_6                    : 41.4485
+  - rsi_momentum             : -1.4583
+  - rsi_trend                : -1
+  - sma_50                   : 3851.1274
+  - stoch_d                  : 36.8405
+  - stoch_k                  : 23.3132
+  - super_trend              : 3828.8480
+  - support                  : 3806.7800
+  - symbol                   : ETHUSDT
+  - volume                   : 1818.7800
+  - volume_ratio             : 0.2168
+  - volume_sma_20            : 14683.2295
+  - vwap_momentum            : 0.4245
+  - williams_r               : -76.6868
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 3850.7800
+Latest Price (For Execution): 3850.7700
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: BNBUSDT
+Timestamp: 2025-10-31 23:26:44.078098
+Aggressiveness: moderate
+------------------------------------------------------------
+[DECISION]
+Action: BUY
+Final Confidence: 21.49%
+Composite Score: 28.1818
+Trade Quality: FAIR (50)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      40.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   50.0000
+  - MTF Score:        50.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 74.32% (This boosts Final Confidence)
+  - ML (RF) Pred: 0 | Conf: 69.28%
+  - ML (GB) Pred: 0 | Conf: 79.36%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 1086.7000
+  - atr                      : 3.4429
+  - atr_percent              : 0.3168
+  - bb_lower                 : 1076.1386
+  - bb_middle                : 1084.2850
+  - bb_position              : 0.6482
+  - bb_upper                 : 1092.4314
+  - close                    : 1086.7000
+  - composite_momentum       : 21.5142
+  - ema_21                   : 1084.9853
+  - ema_34                   : 1084.5172
+  - ema_55                   : 1084.5201
+  - ema_8                    : 1086.4687
+  - ema_89                   : 1085.7458
+  - hma                      : 1087.3959
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.0898
+  - macd_momentum            : 0.3011
+  - macd_trend               : 1
+  - market_regime            : bull_trend
+  - momentum_regime          : bullish
+  - obv_trend                : 496.7830
+  - price_momentum_100       : 1.9610
+  - price_momentum_20        : 0.8351
+  - price_momentum_50        : 0.0368
+  - price_vs_high_20         : 0.9956
+  - price_vs_low_20          : 1.0127
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.8333
+  - resistance               : 1091.5000
+  - rsi_14                   : 54.3422
+  - rsi_21                   : 52.7498
+  - rsi_6                    : 54.6506
+  - rsi_momentum             : 1.5924
+  - rsi_trend                : 1
+  - sma_50                   : 1083.2940
+  - stoch_d                  : 69.4103
+  - stoch_k                  : 63.3588
+  - super_trend              : 1088.4200
+  - support                  : 1073.1000
+  - symbol                   : BNBUSDT
+  - volume                   : 301.7200
+  - volume_ratio             : 0.9229
+  - volume_sma_20            : 1324.7855
+  - vwap_momentum            : -0.0969
+  - williams_r               : -36.6412
+
+[CONTEXT & RISK]
+Market Regime: bull_trend
+Volatility Regime: low
+Analysis Price (Kline Close): 1086.7000
+Latest Price (For Execution): 1087.0000
+Proposed Size: $344.74
+Stop Loss: $1081.8357
+Take Profit: $1095.6071
+============================================================
+
+============================================================
+CYCLE DECISION LOG: XRPUSDT
+Timestamp: 2025-10-31 23:26:44.229538
+Aggressiveness: moderate
+Crypto Regime: N/A | On-Chain: N/A | F&G: N/A
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 2.5091
+  - atr                      : 0.0139
+  - atr_percent              : 0.5551
+  - bb_lower                 : 2.4949
+  - bb_middle                : 2.5167
+  - bb_position              : 0.3258
+  - bb_upper                 : 2.5386
+  - close                    : 2.5091
+  - composite_momentum       : 0.5250
+  - ema_21                   : 2.5152
+  - ema_34                   : 2.5127
+  - ema_55                   : 2.5072
+  - ema_8                    : 2.5147
+  - ema_89                   : 2.5032
+  - hma                      : 2.5129
+  - is_anomaly               : False
+  - ma_alignment             : 0
+  - ma_alignment_strength    : 0
+  - macd_momentum            : -0.0014
+  - macd_trend               : -1
+  - market_regime            : neutral
+  - momentum_regime          : neutral
+  - obv_trend                : 77142.0000
+  - price_momentum_100       : 3.6647
+  - price_momentum_20        : 0.1197
+  - price_momentum_50        : 0.7752
+  - price_vs_high_20         : 0.9826
+  - price_vs_low_20          : 1.0082
+  - regime_confidence        : 0.4000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 2.5535
+  - rsi_14                   : 47.4769
+  - rsi_21                   : 49.4523
+  - rsi_6                    : 40.5380
+  - rsi_momentum             : -1.9754
+  - rsi_trend                : -1
+  - sma_50                   : 2.5113
+  - stoch_d                  : 31.8584
+  - stoch_k                  : 21.4159
+  - super_trend              : 2.4954
+  - support                  : 2.4888
+  - symbol                   : XRPUSDT
+  - volume                   : 968479.8000
+  - volume_ratio             : 0.3695
+  - volume_sma_20            : 3053156.1600
+  - vwap_momentum            : 0.3704
+  - williams_r               : -78.5841
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 2.5091
+Latest Price (For Execution): 2.5086
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: SOLUSDT
+Timestamp: 2025-10-31 23:26:44.370519
+Aggressiveness: moderate
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 186.9500
+  - atr                      : 0.9521
+  - atr_percent              : 0.5093
+  - bb_lower                 : 184.7044
+  - bb_middle                : 186.7855
+  - bb_position              : 0.5395
+  - bb_upper                 : 188.8666
+  - close                    : 186.9500
+  - composite_momentum       : 21.5755
+  - ema_21                   : 187.0046
+  - ema_34                   : 186.9109
+  - ema_55                   : 186.7494
+  - ema_8                    : 187.1250
+  - ema_89                   : 186.8713
+  - hma                      : 187.2705
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.1005
+  - macd_momentum            : 0.0122
+  - macd_trend               : 1
+  - market_regime            : bear_trend
+  - momentum_regime          : bullish
+  - obv_trend                : 12079.0200
+  - price_momentum_100       : 2.7706
+  - price_momentum_20        : 0.9613
+  - price_momentum_50        : 0.3543
+  - price_vs_high_20         : 0.9894
+  - price_vs_low_20          : 1.0141
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 188.9600
+  - rsi_14                   : 49.8886
+  - rsi_21                   : 50.5046
+  - rsi_6                    : 46.0986
+  - rsi_momentum             : -0.6160
+  - rsi_trend                : -1
+  - sma_50                   : 187.0264
+  - stoch_d                  : 58.4103
+  - stoch_k                  : 50.4926
+  - super_trend              : 185.3930
+  - support                  : 184.3500
+  - symbol                   : SOLUSDT
+  - volume                   : 52818.2000
+  - volume_ratio             : 0.2233
+  - volume_sma_20            : 112478.8450
+  - vwap_momentum            : -0.5596
+  - williams_r               : -49.5074
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 186.9500
+Latest Price (For Execution): 186.9400
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: DOGEUSDT
+Timestamp: 2025-10-31 23:26:44.507609
+Aggressiveness: moderate
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 0.1862
+  - atr                      : 0.0008
+  - atr_percent              : 0.4531
+  - bb_lower                 : 0.1840
+  - bb_middle                : 0.1858
+  - bb_position              : 0.5984
+  - bb_upper                 : 0.1876
+  - close                    : 0.1862
+  - composite_momentum       : 22.5712
+  - ema_21                   : 0.1859
+  - ema_34                   : 0.1857
+  - ema_55                   : 0.1855
+  - ema_8                    : 0.1861
+  - ema_89                   : 0.1854
+  - hma                      : 0.1861
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.1727
+  - macd_momentum            : 0.0000
+  - macd_trend               : 1
+  - market_regime            : ranging
+  - momentum_regime          : bullish
+  - obv_trend                : 3354227.3000
+  - price_momentum_100       : 3.7735
+  - price_momentum_20        : 0.9160
+  - price_momentum_50        : 0.5509
+  - price_vs_high_20         : 0.9900
+  - price_vs_low_20          : 1.0147
+  - regime_confidence        : 0.6000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 0.1881
+  - rsi_14                   : 53.5082
+  - rsi_21                   : 53.2045
+  - rsi_6                    : 53.8468
+  - rsi_momentum             : 0.3037
+  - rsi_trend                : 1
+  - sma_50                   : 0.1856
+  - stoch_d                  : 52.1468
+  - stoch_k                  : 48.6339
+  - super_trend              : 0.1846
+  - support                  : 0.1835
+  - symbol                   : DOGEUSDT
+  - volume                   : 4305032.0000
+  - volume_ratio             : 0.2974
+  - volume_sma_20            : 19063195.7000
+  - vwap_momentum            : 0.5090
+  - williams_r               : -51.3661
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 0.1862
+Latest Price (For Execution): 0.1862
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: BTCUSDT
+Timestamp: 2025-10-31 23:26:49.972946
+Aggressiveness: moderate
+Crypto Regime: N/A | On-Chain: N/A | F&G: N/A
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 109536.4000
+  - atr                      : 331.0286
+  - atr_percent              : 0.3022
+  - bb_lower                 : 109094.4983
+  - bb_middle                : 109505.8850
+  - bb_position              : 0.5371
+  - bb_upper                 : 109917.2717
+  - close                    : 109536.4000
+  - composite_momentum       : -18.0121
+  - ema_21                   : 109560.1454
+  - ema_34                   : 109591.5393
+  - ema_55                   : 109573.0044
+  - ema_8                    : 109535.7849
+  - ema_89                   : 109517.0744
+  - hma                      : 109500.5818
+  - is_anomaly               : False
+  - ma_alignment             : -1
+  - ma_alignment_strength    : 0.0170
+  - macd_momentum            : 15.6156
+  - macd_trend               : 1
+  - market_regime            : bear_trend
+  - momentum_regime          : bearish
+  - obv_trend                : 111.2669
+  - price_momentum_100       : 1.7974
+  - price_momentum_20        : 0.2831
+  - price_momentum_50        : -0.1764
+  - price_vs_high_20         : 0.9940
+  - price_vs_low_20          : 1.0058
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 110200.6000
+  - rsi_14                   : 49.0060
+  - rsi_21                   : 49.2096
+  - rsi_6                    : 50.0662
+  - rsi_momentum             : -0.2036
+  - rsi_trend                : -1
+  - sma_50                   : 109718.6840
+  - stoch_d                  : 47.0478
+  - stoch_k                  : 42.0773
+  - super_trend              : 109272.5400
+  - support                  : 108900.1000
+  - symbol                   : BTCUSDT
+  - volume                   : 120.4420
+  - volume_ratio             : 0.2328
+  - volume_sma_20            : 633.9535
+  - vwap_momentum            : -1.7593
+  - williams_r               : -57.9227
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 109536.4000
+Latest Price (For Execution): 109536.4000
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: ETHUSDT
+Timestamp: 2025-10-31 23:26:50.117093
+Aggressiveness: moderate
+Crypto Regime: N/A | On-Chain: N/A | F&G: N/A
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 3850.7700
+  - atr                      : 18.9936
+  - atr_percent              : 0.4932
+  - bb_lower                 : 3812.9355
+  - bb_middle                : 3855.9600
+  - bb_position              : 0.4397
+  - bb_upper                 : 3898.9845
+  - close                    : 3850.7700
+  - composite_momentum       : 21.2388
+  - ema_21                   : 3856.3452
+  - ema_34                   : 3853.6521
+  - ema_55                   : 3849.1018
+  - ema_8                    : 3857.0176
+  - ema_89                   : 3846.5878
+  - hma                      : 3856.9712
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.1028
+  - macd_momentum            : -1.7189
+  - macd_trend               : -1
+  - market_regime            : bull_trend
+  - momentum_regime          : bullish
+  - obv_trend                : 775.2910
+  - price_momentum_100       : 2.4381
+  - price_momentum_20        : 0.7491
+  - price_momentum_50        : 0.2525
+  - price_vs_high_20         : 0.9860
+  - price_vs_low_20          : 1.0116
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.8000
+  - resistance               : 3905.4500
+  - rsi_14                   : 48.1905
+  - rsi_21                   : 49.6500
+  - rsi_6                    : 41.4399
+  - rsi_momentum             : -1.4595
+  - rsi_trend                : -1
+  - sma_50                   : 3851.1272
+  - stoch_d                  : 36.8358
+  - stoch_k                  : 23.2992
+  - super_trend              : 3828.8480
+  - support                  : 3806.7800
+  - symbol                   : ETHUSDT
+  - volume                   : 1852.8700
+  - volume_ratio             : 0.2168
+  - volume_sma_20            : 14683.2295
+  - vwap_momentum            : 0.4243
+  - williams_r               : -76.7008
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 3850.7700
+Latest Price (For Execution): 3850.7700
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: BNBUSDT
+Timestamp: 2025-10-31 23:26:50.338720
+Aggressiveness: moderate
+------------------------------------------------------------
+[DECISION]
+Action: BUY
+Final Confidence: 21.53%
+Composite Score: 28.1818
+Trade Quality: FAIR (50)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      40.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   50.0000
+  - MTF Score:        50.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 73.96% (This boosts Final Confidence)
+  - ML (RF) Pred: 0 | Conf: 68.60%
+  - ML (GB) Pred: 0 | Conf: 79.31%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 1087.0000
+  - atr                      : 3.4429
+  - atr_percent              : 0.3167
+  - bb_lower                 : 1076.1338
+  - bb_middle                : 1084.3000
+  - bb_position              : 0.6653
+  - bb_upper                 : 1092.4662
+  - close                    : 1087.0000
+  - composite_momentum       : 21.5841
+  - ema_21                   : 1085.0126
+  - ema_34                   : 1084.5344
+  - ema_55                   : 1084.5308
+  - ema_8                    : 1086.5353
+  - ema_89                   : 1085.7524
+  - hma                      : 1087.4281
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.0924
+  - macd_momentum            : 0.3203
+  - macd_trend               : 1
+  - market_regime            : bull_trend
+  - momentum_regime          : bullish
+  - obv_trend                : 493.5930
+  - price_momentum_100       : 1.9891
+  - price_momentum_20        : 0.8629
+  - price_momentum_50        : 0.0644
+  - price_vs_high_20         : 0.9959
+  - price_vs_low_20          : 1.0130
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.8000
+  - resistance               : 1091.5000
+  - rsi_14                   : 54.9991
+  - rsi_21                   : 53.1239
+  - rsi_6                    : 56.7795
+  - rsi_momentum             : 1.8752
+  - rsi_trend                : 1
+  - sma_50                   : 1083.3000
+  - stoch_d                  : 70.1736
+  - stoch_k                  : 65.6489
+  - super_trend              : 1088.4200
+  - support                  : 1073.1000
+  - symbol                   : BNBUSDT
+  - volume                   : 317.6700
+  - volume_ratio             : 0.9229
+  - volume_sma_20            : 1324.7855
+  - vwap_momentum            : -0.0693
+  - williams_r               : -34.3511
+
+[CONTEXT & RISK]
+Market Regime: bull_trend
+Volatility Regime: low
+Analysis Price (Kline Close): 1087.0000
+Latest Price (For Execution): 1087.0000
+Proposed Size: $344.04
+Stop Loss: $1081.8357
+Take Profit: $1095.6071
+============================================================
+
+============================================================
+CYCLE DECISION LOG: XRPUSDT
+Timestamp: 2025-10-31 23:26:50.480264
+Aggressiveness: moderate
+Crypto Regime: N/A | On-Chain: N/A | F&G: N/A
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 2.5086
+  - atr                      : 0.0140
+  - atr_percent              : 0.5567
+  - bb_lower                 : 2.4948
+  - bb_middle                : 2.5167
+  - bb_position              : 0.3152
+  - bb_upper                 : 2.5386
+  - close                    : 2.5086
+  - composite_momentum       : 0.5080
+  - ema_21                   : 2.5151
+  - ema_34                   : 2.5127
+  - ema_55                   : 2.5072
+  - ema_8                    : 2.5146
+  - ema_89                   : 2.5032
+  - hma                      : 2.5129
+  - is_anomaly               : False
+  - ma_alignment             : 0
+  - ma_alignment_strength    : 0
+  - macd_momentum            : -0.0015
+  - macd_trend               : -1
+  - market_regime            : neutral
+  - momentum_regime          : neutral
+  - obv_trend                : 75143.9600
+  - price_momentum_100       : 3.6440
+  - price_momentum_20        : 0.0998
+  - price_momentum_50        : 0.7551
+  - price_vs_high_20         : 0.9824
+  - price_vs_low_20          : 1.0080
+  - regime_confidence        : 0.4000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 2.5535
+  - rsi_14                   : 47.2619
+  - rsi_21                   : 49.3058
+  - rsi_6                    : 40.0271
+  - rsi_momentum             : -2.0439
+  - rsi_trend                : -1
+  - sma_50                   : 2.5113
+  - stoch_d                  : 31.5634
+  - stoch_k                  : 20.5310
+  - super_trend              : 2.4954
+  - support                  : 2.4888
+  - symbol                   : XRPUSDT
+  - volume                   : 978470.0000
+  - volume_ratio             : 0.3695
+  - volume_sma_20            : 3053156.1600
+  - vwap_momentum            : 0.3504
+  - williams_r               : -79.4690
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 2.5086
+Latest Price (For Execution): 2.5086
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: SOLUSDT
+Timestamp: 2025-10-31 23:26:50.628152
+Aggressiveness: moderate
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 186.9400
+  - atr                      : 0.9521
+  - atr_percent              : 0.5093
+  - bb_lower                 : 184.7041
+  - bb_middle                : 186.7850
+  - bb_position              : 0.5372
+  - bb_upper                 : 188.8659
+  - close                    : 186.9400
+  - composite_momentum       : 21.5649
+  - ema_21                   : 187.0037
+  - ema_34                   : 186.9103
+  - ema_55                   : 186.7491
+  - ema_8                    : 187.1228
+  - ema_89                   : 186.8711
+  - hma                      : 187.2694
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.1000
+  - macd_momentum            : 0.0116
+  - macd_trend               : 1
+  - market_regime            : bear_trend
+  - momentum_regime          : bullish
+  - obv_trend                : 11573.4600
+  - price_momentum_100       : 2.7651
+  - price_momentum_20        : 0.9559
+  - price_momentum_50        : 0.3489
+  - price_vs_high_20         : 0.9893
+  - price_vs_low_20          : 1.0140
+  - regime_confidence        : 0.9000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 188.9600
+  - rsi_14                   : 49.8094
+  - rsi_21                   : 50.4544
+  - rsi_6                    : 45.8977
+  - rsi_momentum             : -0.6450
+  - rsi_trend                : -1
+  - sma_50                   : 187.0262
+  - stoch_d                  : 58.3282
+  - stoch_k                  : 50.2463
+  - super_trend              : 185.3930
+  - support                  : 184.3500
+  - symbol                   : SOLUSDT
+  - volume                   : 55346.0000
+  - volume_ratio             : 0.2233
+  - volume_sma_20            : 112478.8450
+  - vwap_momentum            : -0.5649
+  - williams_r               : -49.7537
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 186.9400
+Latest Price (For Execution): 186.9400
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
+============================================================
+CYCLE DECISION LOG: DOGEUSDT
+Timestamp: 2025-10-31 23:26:50.780577
+Aggressiveness: moderate
+------------------------------------------------------------
+[DECISION]
+Action: HOLD
+Final Confidence: 0.00%
+Composite Score: 0.0000
+Trade Quality: POOR (0)
+
+[SCORE BREAKDOWN]
+  - Trend Score:      0.0000
+  - Mean Rev Score:   0.0000
+  - Breakout Score:   0.0000
+  - MTF Score:        0.0000
+  - ML Score:         0.0000
+
+[ML PREDICTOR DETAILS]
+  - ML Raw Prediction: 0 (This is scaled to ML Score)
+  - ML Model Confidence: 0.00% (This boosts Final Confidence)
+  - ML (RF) Pred: N/A | Conf: 0.00%
+  - ML (GB) Pred: N/A | Conf: 0.00%
+
+[TECHNICAL INDICATORS (Raw Values)]
+  - analysis_price           : 0.1862
+  - atr                      : 0.0008
+  - atr_percent              : 0.4530
+  - bb_lower                 : 0.1840
+  - bb_middle                : 0.1858
+  - bb_position              : 0.6036
+  - bb_upper                 : 0.1876
+  - close                    : 0.1862
+  - composite_momentum       : 22.5936
+  - ema_21                   : 0.1859
+  - ema_34                   : 0.1857
+  - ema_55                   : 0.1855
+  - ema_8                    : 0.1861
+  - ema_89                   : 0.1854
+  - hma                      : 0.1861
+  - is_anomaly               : False
+  - ma_alignment             : 1
+  - ma_alignment_strength    : 0.1737
+  - macd_momentum            : 0.0000
+  - macd_trend               : 1
+  - market_regime            : ranging
+  - momentum_regime          : bullish
+  - obv_trend                : 3351183.7000
+  - price_momentum_100       : 3.7846
+  - price_momentum_20        : 0.9269
+  - price_momentum_50        : 0.5617
+  - price_vs_high_20         : 0.9901
+  - price_vs_low_20          : 1.0148
+  - regime_confidence        : 0.6000
+  - regime_transition_prob   : 0.9000
+  - resistance               : 0.1881
+  - rsi_14                   : 53.6952
+  - rsi_21                   : 53.3219
+  - rsi_6                    : 54.4273
+  - rsi_momentum             : 0.3733
+  - rsi_trend                : 1
+  - sma_50                   : 0.1856
+  - stoch_d                  : 52.3289
+  - stoch_k                  : 49.1803
+  - super_trend              : 0.1846
+  - support                  : 0.1835
+  - symbol                   : DOGEUSDT
+  - volume                   : 4320250.0000
+  - volume_ratio             : 0.2974
+  - volume_sma_20            : 19063195.7000
+  - vwap_momentum            : 0.5198
+  - williams_r               : -50.8197
+
+[CONTEXT & RISK]
+Market Regime: neutral
+Volatility Regime: normal
+Analysis Price (Kline Close): 0.1862
+Latest Price (For Execution): 0.1862
+Proposed Size: $0.00
+Stop Loss: $0.0000
+Take Profit: $0.0000
+============================================================
+
