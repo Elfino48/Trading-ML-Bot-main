@@ -1361,7 +1361,7 @@ class EnhancedStrategyOrchestrator:
                 decision['trade_quality']['weaknesses'].append(f"Low volume: {volume_warning}")
             else:
                 # Normal execution logic for volume-ok scenarios
-                should_execute, execute_reason = self._should_execute_trade(decision)
+                should_execute, execute_reason = self._should_execute_trade(decision, symbol)
                 decision['should_execute'] = should_execute
                 decision['execute_reason'] = execute_reason
             # ========== VOLUME FILTER EXECUTION BLOCK END ==========
@@ -2135,7 +2135,7 @@ class EnhancedStrategyOrchestrator:
         
         return min(0.95, execution_confidence)
 
-    def _should_execute_trade(self, decision: Dict) -> Tuple[bool, str]:
+    def _should_execute_trade(self, decision: Dict, symbol: str) -> Tuple[bool, str]:
         """Dynamic trend-aware execution criteria"""
         
         action = decision['action']
@@ -2164,7 +2164,10 @@ class EnhancedStrategyOrchestrator:
         if action == 'SELL' and trend_score > sell_threshold:
             return False, f"Trend score {trend_score} above {regime} sell threshold {sell_threshold}"
         
-        if ml_confidence > 0.75:
+        threshold_config = self.get_crypto_optimized_thresholds().get(symbol, {})
+        veto_confidence = threshold_config.get('veto_confidence', 0.85)
+
+        if ml_confidence > veto_confidence:
             if (action == 'BUY' and ml_prediction <= 0) or (action == 'SELL' and ml_prediction >= 0):
                 return False, f"High-confidence ML veto (conf: {ml_confidence:.1%}, pred: {ml_prediction})"
         
@@ -2173,6 +2176,16 @@ class EnhancedStrategyOrchestrator:
             return False, "Signals not aligned across strategies"
         
         return True, "Execution approved"
+
+    def get_crypto_optimized_thresholds(self):
+        return {
+            'BTCUSDT': {'min_threshold': 0.025, 'veto_confidence': 0.80},
+            'ETHUSDT': {'min_threshold': 0.028, 'veto_confidence': 0.80},
+            'BNBUSDT': {'min_threshold': 0.032, 'veto_confidence': 0.85},
+            'XRPUSDT': {'min_threshold': 0.035, 'veto_confidence': 0.85},
+            'SOLUSDT': {'min_threshold': 0.040, 'veto_confidence': 0.90},
+            'DOGEUSDT': {'min_threshold': 0.045, 'veto_confidence': 0.90}
+        }
 
     def _trend_following_strategy(self, indicators: Dict) -> float:
             try:
