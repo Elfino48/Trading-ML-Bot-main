@@ -8,12 +8,14 @@ from decimal import Decimal, ROUND_DOWN
 from bybit_client import BybitClient
 from advanced_risk_manager import AdvancedRiskManager
 from config import SYMBOLS
+from telegram_bot import TelegramBot
 
 class ExecutionEngine:
-    def __init__(self, bybit_client: BybitClient, risk_manager: AdvancedRiskManager):
+    def __init__(self, bybit_client: BybitClient, risk_manager: AdvancedRiskManager, telegram_bot: Optional[TelegramBot] = None):
             self.logger = logging.getLogger('ExecutionEngine')
             self.client = bybit_client
             self.risk_manager = risk_manager
+            self.telegram_bot = telegram_bot
             self.open_orders: Dict[str, Dict] = {}
             self.position_cache: Dict[str, Dict] = {}
             self.trade_history = []
@@ -39,6 +41,48 @@ class ExecutionEngine:
 
     def set_main_bot(self, main_bot_instance):
         self.main_bot = main_bot_instance
+
+    def clear_trade_history(self):
+        """
+        Clears the in-memory trade history.
+        Used by EmergencyProtocols to prevent reset loops based on old failures.
+        """
+        with self._state_lock:
+            self.trade_history.clear()
+        self.logger.info("In-memory trade history has been cleared.")
+
+    def update_position_cache_from_rest(self, rest_positions: Dict[str, Dict]):
+        """
+        Forces the internal position cache to match a snapshot from the REST API.
+        This is the primary mechanism for correcting cache/state drift.
+        """
+        self.logger.info(f"Syncing position cache with REST API snapshot ({len(rest_positions)} open positions).")
+        try:
+            with self._state_lock:
+                self.position_cache.clear()
+                for symbol, pos_data in rest_positions.items():
+                    # Ensure data is in the same format as WS updates (floats/ints)
+                    if float(pos_data.get('size', 0)) > 0:
+                        self.position_cache[symbol] = {
+                            'size': float(pos_data.get('size', 0)),
+                            'side': pos_data.get('side'),
+                            'avgPrice': float(pos_data.get('avgPrice', 0)),
+                            'positionValue': float(pos_data.get('positionValue', 0)),
+                            'unrealisedPnl': float(pos_data.get('unrealisedPnl', 0)),
+                            'liqPrice': float(pos_data.get('liqPrice', 0)),
+                            'updatedTime': int(pos_data.get('updatedTime', time.time()*1000))
+                        }
+            self.logger.info("Position cache sync complete.")
+        except Exception as e:
+            self.logger.error(f"Failed to update position cache from REST: {e}", exc_info=True)
+
+    def get_live_positions_from_cache(self) -> Dict[str, Dict]:
+        with self._state_lock:
+            live_positions = {
+                symbol: pos for symbol, pos in self.position_cache.items()
+                if pos.get('size', 0) > 0
+            }
+            return live_positions   
 
     def _fetch_initial_instrument_info(self):
         self.logger.info("Fetching initial instrument information...")
@@ -945,90 +989,30 @@ class ExecutionEngine:
             
             market_impact = self.market_impact_model.estimate_impact(symbol, final_quantity_float, side)
 
+            # --- SOLUTION 2: TWO-STEP EXECUTION ---
+            
+            # Step 1: Place the Market Order WITHOUT SL/TP
+            self.logger.info(f"   STEP 1: Placing Market {side} order for {final_quantity_str} {symbol}...")
             order_response = self.client.place_order(
                 symbol=symbol,
                 side=side,
                 order_type='Market',
                 qty=final_quantity_str,
                 price=None,
-                stop_loss=stop_loss,
-                take_profit=take_profit
+                stop_loss=None,
+                take_profit=None
             )
 
-            if order_response and order_response.get('retCode') == 0:
-                order_id = order_response['result']['orderId']
-                executed_price_str = order_response['result'].get('avgPrice', '0')
-                executed_price = float(executed_price_str) if executed_price_str and executed_price_str != '0' else fresh_current_price
-
-                with self._state_lock:
-                    self.open_orders[order_id] = {
-                        'symbol': symbol, 'order_id': order_id, 'side': side,
-                        'quantity': final_quantity_float,
-                        'timestamp': time.time(), 'status': 'New',
-                        'type': 'Market', 'avgPrice': executed_price
-                    }
-
-                    current_pos_data = self.position_cache.get(symbol, {})
-                    old_size = current_pos_data.get('size', 0)
-                    
-                    new_size = old_size + final_quantity_float
-                    
-                    self.position_cache[symbol] = {
-                        'size': new_size,
-                        'side': side,
-                        'avgPrice': executed_price,
-                        'positionValue': new_size * executed_price,
-                        'unrealisedPnl': 0,
-                        'liqPrice': 0,
-                        'updatedTime': int(time.time() * 1000)
-                    }
-                    self.logger.info(f"Optimistically updated position_cache for {symbol}: New size {new_size}")
-                    
-                self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
-
-                trade_record = {**decision}
-                trade_record.update({
-                    'timestamp': time.time(),
-                    'side': side,
-                    'quantity': final_quantity_float,
-                    'position_size_usdt': final_size_usdt,
-                    'entry_price': executed_price,
-                    'order_id': order_id,
-                    'success': True,
-                    'stop_loss': stop_loss,
-                    'take_profit': take_profit
-                })
-                trade_record.pop('signals', None)
-                trade_record.pop('market_context', None)
-                trade_record.pop('trade_quality', None)
-
-                self.trade_history.append(trade_record)
-
-                if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
-                    self.risk_manager.database.store_trade(trade_record)
-
-                self.logger.info(f"✅ Enhanced trade for {symbol} placed successfully! Order ID: {order_id}")
-
-                self.risk_manager.record_trade_outcome(successful=True, pnl=0)
-                
-                return {
-                    'success': True, 'order_id': order_id, 'symbol': symbol, 'side': side,
-                    'quantity': final_quantity_float,
-                    'executed_price': executed_price,
-                    'position_size': final_size_usdt,
-                    'stop_loss': stop_loss, 'take_profit': take_profit,
-                    'risk_reward': decision.get('risk_reward_ratio', 0),
-                    'confidence': decision.get('confidence', 0)
-                }
-            else:
+            if not (order_response and order_response.get('retCode') == 0):
+                # Market order itself failed
                 error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
                 ret_code = order_response.get('retCode', -1) if order_response else -1
-
+                
                 if ret_code == 110007:
                     self.logger.info(f"ℹ️ Trade skipped for {symbol}: {error_msg} (Code: {ret_code}). This is NOT an error.")
                     return {'success': False, 'message': f'Skipped: {error_msg} (Code: {ret_code})'}
-                
-                self.logger.error(f"❌ Enhanced trade order failed for {symbol}: {error_msg} (Code: {ret_code})")
+
+                self.logger.error(f"❌ Enhanced trade (Step 1: Market Order) failed for {symbol}: {error_msg} (Code: {ret_code})")
 
                 trade_record = {**decision}
                 trade_record.update({
@@ -1038,9 +1022,7 @@ class ExecutionEngine:
                     'entry_price': None, 'order_id': None, 'success': False,
                     'error_message': f"Code {ret_code}: {error_msg}"
                 })
-                trade_record.pop('signals', None)
-                trade_record.pop('market_context', None)
-                trade_record.pop('trade_quality', None)
+                trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
 
                 self.trade_history.append(trade_record)
                 if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
@@ -1048,7 +1030,134 @@ class ExecutionEngine:
 
                 self.risk_manager.record_trade_outcome(successful=False, pnl=0)
                 
-                return {'success': False, 'message': f'Order failed ({ret_code}): {error_msg}'}
+                return {'success': False, 'message': f'Order failed (Step 1: Market Order) ({ret_code}): {error_msg}'}
+
+            # Step 1 was successful, get fill price
+            order_id = order_response['result']['orderId']
+
+            # --- NEW: Wait for position to update and fetch live entry price ---
+            time.sleep(0.5) # Give Bybit's API a moment to update the position
+            executed_price = self._get_live_position_entry_price(symbol, fallback_price=fresh_current_price)
+            # --- END NEW ---
+            
+            self.logger.info(f"   STEP 1: Market Order {order_id} for {symbol} filled. Live position avg price: ${executed_price:.4f}")
+
+            # --- NEW: Re-anchor SL/TP to actual executed_price ---
+            analysis_price = decision.get('analysis_price', fresh_current_price)
+            original_sl = decision['stop_loss']
+            original_tp = decision['take_profit']
+
+            if analysis_price > 0:
+                if action == 'BUY':
+                    risk_distance = analysis_price - original_sl
+                    reward_distance = original_tp - analysis_price
+                    
+                    final_stop_loss = executed_price - risk_distance
+                    final_take_profit = executed_price + reward_distance
+                else: # SELL
+                    risk_distance = original_sl - analysis_price
+                    reward_distance = analysis_price - original_tp
+                    
+                    final_stop_loss = executed_price + risk_distance
+                    final_take_profit = executed_price - reward_distance
+                
+                self.logger.info(f"   Re-anchored SL/TP to fill price ${executed_price:.4f}")
+                self.logger.info(f"   Final SL: ${final_stop_loss:.4f}, Final TP: ${final_take_profit:.4f}")
+            else:
+                self.logger.warning("Could not re-anchor SL/TP, analysis_price was zero. Using original values.")
+                final_stop_loss = stop_loss
+                final_take_profit = take_profit
+            # --- END NEW ---
+
+            # Step 2: Set the SL/TP on the now-open position
+            self.logger.info(f"   STEP 2: Attaching SL (${final_stop_loss:.4f}) and TP (${final_take_profit:.4f}) to {symbol} position...")
+            sl_tp_response = self.client.set_trading_stop(
+                symbol=symbol,
+                stop_loss=str(final_stop_loss),
+                take_profit=str(final_take_profit)
+            )
+
+            trade_record = {**decision} # Prepare trade record now
+
+            if not (sl_tp_response and sl_tp_response.get('retCode') == 0):
+                # SL/TP attachment failed! This is a CRITICAL state.
+                error_msg = sl_tp_response.get('retMsg', 'Unknown error') if sl_tp_response else 'No response'
+                ret_code = sl_tp_response.get('retCode', -1) if sl_tp_response else -1
+                self.logger.critical(f"   ❌ CRITICAL: Market order {order_id} for {symbol} FILLED, but FAILED TO SET SL/TP! (Code: {ret_code}): {error_msg}")
+                
+                if self.telegram_bot:
+                    self.telegram_bot.log_error(
+                        f"CRITICAL: {symbol} position is OPEN and UNPROTECTED. Failed to set SL/TP: {error_msg}",
+                        "Execution (Step 2)"
+                    )
+                
+                # Update trade record with the failure
+                trade_record.update({
+                    'timestamp': time.time(), 'side': side, 'quantity': final_quantity_float,
+                    'position_size_usdt': final_size_usdt, 'entry_price': executed_price,
+                    'order_id': order_id, 'success': True, 'stop_loss': 0, 'take_profit': 0,
+                    'error_message': f"SL/TP SET FAILED ({ret_code}): {error_msg}"
+                })
+
+            else:
+                # Step 2 was successful
+                self.logger.info(f"   STEP 2: SL/TP attached successfully for {symbol}.")
+                
+                # Update trade record with success
+                trade_record.update({
+                    'timestamp': time.time(), 'side': side, 'quantity': final_quantity_float,
+                    'position_size_usdt': final_size_usdt, 'entry_price': executed_price,
+                    'order_id': order_id, 'success': True,
+                    'stop_loss': final_stop_loss, 'take_profit': final_take_profit
+                })
+
+                # --- SEND NEW TELEGRAM ALERT ---
+                if self.telegram_bot:
+                    self.telegram_bot.log_two_step_execution(
+                        symbol, side, final_quantity_float, executed_price, final_stop_loss, final_take_profit
+                    )
+
+            # --- ALL LOGGING AND STATE UPDATES (Common for both success/failure of Step 2) ---
+            with self._state_lock:
+                self.open_orders[order_id] = {
+                    'symbol': symbol, 'order_id': order_id, 'side': side,
+                    'quantity': final_quantity_float,
+                    'timestamp': time.time(), 'status': 'Filled',
+                    'type': 'Market', 'avgPrice': executed_price
+                }
+                
+                current_pos_data = self.position_cache.get(symbol, {})
+                old_size = current_pos_data.get('size', 0)
+                new_size = old_size + final_quantity_float
+                self.position_cache[symbol] = {
+                    'size': new_size, 'side': side, 'avgPrice': executed_price,
+                    'positionValue': new_size * executed_price, 'unrealisedPnl': 0, 'liqPrice': 0,
+                    'updatedTime': int(time.time() * 1000)
+                }
+                self.logger.info(f"Optimistically updated position_cache for {symbol}: New size {new_size}")
+                
+            self._log_execution_quality('MARKET', symbol, current_price_at_decision, executed_price, final_quantity_float, market_impact)
+
+            trade_record.pop('signals', None); trade_record.pop('market_context', None); trade_record.pop('trade_quality', None)
+
+            self.trade_history.append(trade_record)
+            if self.risk_manager and hasattr(self.risk_manager, 'database') and self.risk_manager.database:
+                self.risk_manager.database.store_trade(trade_record)
+
+            self.logger.info(f"✅ Enhanced 2-step trade for {symbol} logged. Order ID: {order_id}")
+            self.risk_manager.record_trade_outcome(successful=True, pnl=0)
+
+            # Return success, but include the error message if Step 2 failed
+            return {
+                'success': True, 'order_id': order_id, 'symbol': symbol, 'side': side,
+                'quantity': final_quantity_float,
+                'executed_price': executed_price,
+                'position_size': final_size_usdt,
+                'stop_loss': trade_record['stop_loss'], 'take_profit': trade_record['take_profit'],
+                'risk_reward': decision.get('risk_reward_ratio', 0),
+                'confidence': decision.get('confidence', 0),
+                'error': trade_record.get('error_message')
+            }
 
         except Exception as e:
             symbol_for_log = decision.get('symbol', 'UNKNOWN') if isinstance(decision, dict) else 'UNKNOWN'
@@ -1161,7 +1270,40 @@ class ExecutionEngine:
             except Exception as e:
                 self.logger.error(f"❌ Exception canceling orders: {e}", exc_info=True)
                 return None
-    
+
+    def _get_live_position_entry_price(self, symbol: str, fallback_price: float) -> float:
+        """
+        Fetches the average entry price from a live Bybit position.
+        This is the most reliable way to get the true fill price after a market order.
+        """
+        try:
+            # Attempt to fetch live position data
+            pos_response = self.client.get_position_info(symbol=symbol, category="linear", settleCoin="USDT")
+
+            if pos_response and pos_response.get('retCode') == 0:
+                pos_list = pos_response['result'].get('list', [])
+                if pos_list:
+                    position_data = pos_list[0]
+                    avg_price_str = position_data.get('avgPrice', '0')
+                    
+                    if avg_price_str and float(avg_price_str) > 0:
+                        self.logger.debug(f"Successfully fetched live avgPrice for {symbol}: {avg_price_str}")
+                        return float(avg_price_str)
+                    else:
+                        self.logger.warning(f"Live position for {symbol} found, but avgPrice was '{avg_price_str}'. Using fallback.")
+                else:
+                    self.logger.warning(f"No live position list returned for {symbol} after fill. Using fallback.")
+            else:
+                err = pos_response.get('retMsg', 'No response') if pos_response else 'No response'
+                self.logger.error(f"Failed to get_position_info for {symbol} to fetch avgPrice: {err}. Using fallback.")
+
+        except Exception as e:
+            self.logger.error(f"Exception fetching live position avgPrice for {symbol}: {e}. Using fallback.", exc_info=True)
+
+        # Fallback to the price used to send the order
+        self.logger.error(f"CRITICAL FALLBACK: Could not determine live fill price for {symbol}. Using pre-order price ${fallback_price:.4f}.")
+        return fallback_price
+
     def get_position_info(self, symbol: str = None):
             self.logger.debug(f"Getting position info for {symbol or 'all'}...")
             with self._state_lock:
@@ -1835,9 +1977,9 @@ class ExecutionEngine:
             start_time = time.time()
             results = {'success': False, 'message': 'Emergency stop initiated'}
             try:
-                cancel_result = self.cancel_all_orders(settleCoin="USDT")
-                if not cancel_result or cancel_result.get('retCode') != 0:
-                    self.logger.error("Failed to cancel all orders during emergency stop.")
+                #cancel_result = self.cancel_all_orders(settleCoin="USDT")
+                #if not cancel_result or cancel_result.get('retCode') != 0:
+                #    self.logger.error("Failed to cancel all orders during emergency stop.")
                     
                 symbols_to_close = []
                 try:
@@ -2370,3 +2512,58 @@ class SmartOrderRouter:
             'quality': 'AVERAGE',
             'orderbook_quality': 0.5
         }
+
+    def execute_partial_close(self, symbol: str, percentage: float) -> Dict:
+        self.logger.info(f"Attempting partial close for {symbol}, {percentage*100}%")
+        
+        if percentage <= 0 or percentage >= 1:
+            return {'success': False, 'message': 'Percentage must be between 0 and 1'}
+
+        with self._state_lock:
+            position = self.position_cache.get(symbol)
+            if not position or position.get('size', 0) <= 0:
+                return {'success': False, 'message': 'No open position found in cache'}
+            
+            current_size = position['size']
+            close_side = 'Buy' if position['side'] == 'Sell' else 'Sell'
+
+        quantity_to_close = current_size * percentage
+        
+        try:
+            instrument_info = self.get_instrument_info(symbol)
+            if not instrument_info:
+                return {'success': False, 'message': 'Failed to get instrument info'}
+
+            min_qty = instrument_info['minOrderQty']
+            qty_step = instrument_info['qtyStep']
+            
+            quantity_decimal = (Decimal(str(quantity_to_close)) / qty_step).quantize(Decimal('0'), ROUND_DOWN) * qty_step
+            
+            if quantity_decimal < min_qty:
+                self.logger.warning(f"Partial close quantity {quantity_decimal} for {symbol} is below minimum {min_qty}.")
+                return {'success': False, 'message': f'Calculated partial quantity {quantity_decimal} is below minimum {min_qty}'}
+
+            final_quantity_str = str(quantity_decimal)
+
+            self.logger.info(f"Executing partial close: {close_side} {final_quantity_str} {symbol} (reduce_only)")
+
+            order_response = self.client.place_order(
+                symbol=symbol,
+                side=close_side,
+                order_type='Market',
+                qty=final_quantity_str,
+                reduce_only=True
+            )
+
+            if order_response and order_response.get('retCode') == 0:
+                order_id = order_response['result']['orderId']
+                self.logger.info(f"✅ Partial close order placed for {symbol}. Order ID: {order_id}")
+                return {'success': True, 'order_id': order_id, 'quantity_closed': float(quantity_decimal)}
+            else:
+                error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
+                self.logger.error(f"❌ Partial close order failed for {symbol}: {error_msg}")
+                return {'success': False, 'message': f'Partial close order failed: {error_msg}'}
+
+        except Exception as e:
+            self.logger.error(f"❌ Exception during partial close for {symbol}: {e}", exc_info=True)
+            return {'success': False, 'message': f'Exception: {e}'}

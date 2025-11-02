@@ -44,7 +44,8 @@ class TelegramBot:
             '/metrics': self._handle_metrics,
             '/reset_errors': self._handle_reset_errors,
             '/database': self._handle_database,
-            '/forceretrain': self._handle_forceretrain
+            '/forceretrain': self._handle_forceretrain,
+            '/close': self._handle_close
         }
 
     def _handle_forceretrain(self, chat_id: str, args: List[str]):
@@ -149,7 +150,36 @@ class TelegramBot:
                 print(f"Exception sending initial summary message: {e}")
         else:
             self._edit_message(text, self.summary_message_id)
-    
+
+    def _handle_close(self, chat_id: str, args: List[str]):
+        if not self.trading_bot or not self.trading_bot.execution_engine:
+            self.send_message(chat_id, "❌ Bot or ExecutionEngine not connected")
+            return
+
+        if not args:
+            self.send_message(chat_id, "Usage: <code>/close [SYMBOL]</code>\nExample: <code>/close BTCUSDT</code>")
+            return
+            
+        symbol_to_close = args[0].upper()
+        
+        try:
+            self.send_message(chat_id, f"Attempting to market-close position for <b>{symbol_to_close}</b>...")
+            
+            result = self.trading_bot.execution_engine.close_position(
+                symbol_to_close,
+                "Manual Telegram Close"
+            )
+            
+            if result.get('success'):
+                message = f"✅ <b>Closure Order Sent</b>\n\n<b>Symbol:</b> {symbol_to_close}\n<b>Order ID:</b> {result.get('order_id', 'N/A')}\n<b>Status:</b> Position closure initiated."
+                self.send_message(chat_id, message)
+            else:
+                message = f"❌ <b>Closure Failed</b>\n\n<b>Symbol:</b> {symbol_to_close}\n<b>Error:</b> {result.get('message', 'Unknown error')}"
+                self.send_message(chat_id, message)
+
+        except Exception as e:
+            self.send_message(chat_id, f"❌ Error during manual close: {e}")
+
     def _generate_summary_text(self) -> Optional[str]:
         if not self.trading_bot or not self.trading_bot.database or not self.trading_bot.execution_engine:
             return "Bot is initializing..."
@@ -309,6 +339,7 @@ class TelegramBot:
 /reset_errors - Reset error handler
 /database - Database statistics
 /forceretrain [confirm] - Force retraining of all ML models (intensive)
+/close [SYMBOL] - Manually market-close an open position
 
 /help - Show this help message
 
@@ -802,6 +833,40 @@ class TelegramBot:
         except Exception as e:
             print(f"Error clearing Telegram update queue: {e}. May process old commands.")
 
+    def log_reconciliation_close(self, symbol: str, pnl_usdt: float, pnl_percent: float):
+        """Logs when a 'ghost' position is found to be closed during reconciliation."""
+        emoji = "✅" if pnl_usdt >= 0 else "🔻"
+        message = f"""
+👻 <b>POSITION RECONCILED</b> {emoji}
+
+<b>Symbol:</b> {symbol}
+<b>Final PnL:</b> ${pnl_usdt:,.2f} ({pnl_percent:+.2f}%)
+
+ℹ️ <i>A position open in the local DB was found to be closed on the exchange (e.g., manual close or exchange event). The trade has been updated.</i>
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
+    def log_two_step_execution(self, symbol: str, side: str, qty: float, fill_price: float, sl: float, tp: float):
+        emoji = "🟢" if side == 'Buy' else "🔴"
+        message = f"""
+{emoji} <b>TRADE EXECUTED (2-Step)</b>
+
+<b>Symbol:</b> {symbol}
+<b>Action:</b> {side}
+<b>Quantity:</b> {qty}
+
+- <b>Step 1:</b> Market order filled @ ${fill_price:,.4f}
+- <b>Step 2:</b> SL/TP successfully attached.
+
+<b>Risk Management:</b>
+   • Stop Loss: ${sl:,.4f}
+   • Take Profit: ${tp:,.4f}
+
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
     def start_polling(self):
         self.running = True
         
@@ -829,7 +894,60 @@ class TelegramBot:
     
     def stop_polling(self):
         self.running = False
-    
+        
+    def log_partial_take_profit(self, symbol: str, pnl_percent: float, closed_qty: float, size_percent: float):
+        message = f"""
+💰 <b>PARTIAL TAKE PROFIT</b>
+
+<b>Symbol:</b> {symbol}
+<b>PnL:</b> {pnl_percent:+.2f}%
+<b>Size Closed:</b> {closed_qty} ({size_percent*100}%)
+
+✅ <i>Profit locked in. Remaining position is now risk-managed.</i>
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
+    def log_trailing_stop_close(self, symbol: str, pnl_percent: float, sl_price: float, side: str):
+        message = f"""
+🛡️ <b>TRAILING STOP HIT</b>
+
+<b>Symbol:</b> {symbol}
+<b>Side:</b> {side}
+<b>Final PnL:</b> {pnl_percent:+.2f}%
+<b>SL Price:</b> ${sl_price:,.4f}
+
+✅ <i>Position closed by Trailing Stop Loss.</i>
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
+    def log_signal_invalidation_close(self, symbol: str, old_side: str, new_signal: str):
+        message = f"""
+🔄 <b>SIGNAL INVALIDATION</b>
+
+<b>Symbol:</b> {symbol}
+<b>Old Position:</b> {old_side}
+<b>New Signal:</b> {new_signal}
+
+🧠 <i>Market conditions changed. Closing position based on new analysis.</i>
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
+    def log_time_stop_close(self, symbol: str, pnl_percent: float, candles_open: int):
+        message = f"""
+⌛ <b>TIME STOP</b>
+
+<b>Symbol:</b> {symbol}
+<b>Final PnL:</b> {pnl_percent:+.2f}%
+<b>Candles Open:</b> {candles_open}
+
+⏳ <i>Trade was stale and did not become profitable. Closing to free up capital.</i>
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
     def log_bot_start(self, portfolio_value: float, symbols: List[str], aggressiveness: str):
         message = f"""
 🤖 <b>TRADING BOT STARTED</b>

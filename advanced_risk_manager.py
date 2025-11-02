@@ -1530,6 +1530,45 @@ class AdvancedRiskManager:
             print(f"Error determining risk reduction: {e}")
             return False
 
+    def calculate_trailing_stop(self, original_trade: dict, current_price: float, pnl_percent: float, atr: float) -> float:
+        try:
+            entry_price = float(original_trade.get('entry_price', 0))
+            original_sl = float(original_trade.get('stop_loss', 0))
+            side = original_trade.get('action', 'BUY')
+            
+            if entry_price == 0 or original_sl == 0:
+                return 0
+
+            breakeven_pnl_trigger = 1.0
+            atr_trail_pnl_trigger = 2.0
+            atr_multiplier = 1.5
+
+            current_sl = original_sl
+            
+            if side == 'BUY':
+                breakeven_sl = entry_price
+                if pnl_percent >= breakeven_pnl_trigger:
+                    current_sl = max(current_sl, breakeven_sl)
+
+                if pnl_percent >= atr_trail_pnl_trigger:
+                    atr_sl = current_price - (atr * atr_multiplier)
+                    current_sl = max(current_sl, atr_sl)
+                    
+            elif side == 'SELL':
+                breakeven_sl = entry_price
+                if pnl_percent >= breakeven_pnl_trigger:
+                    current_sl = min(current_sl, breakeven_sl)
+
+                if pnl_percent >= atr_trail_pnl_trigger:
+                    atr_sl = current_price + (atr * atr_multiplier)
+                    current_sl = min(current_sl, atr_sl)
+
+            return current_sl
+
+        except Exception as e:
+            self.logger.error(f"Error in calculate_trailing_stop: {e}", exc_info=True)
+            return 0
+
     def get_risk_reduction_suggestions(self) -> List[str]:
         try:
             suggestions = []

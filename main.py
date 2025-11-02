@@ -14,6 +14,7 @@ from trading_database import TradingDatabase
 from emergency_protocols import EmergencyProtocols
 from strategy_optimizer import StrategyOptimizer
 from advanced_backtester import AdvancedBacktester
+from position_manager import PositionManager
 import logging
 import logging.config
 import logging.handlers
@@ -58,13 +59,23 @@ class AdvancedTradingBot:
 
             self.strategy_orchestrator.ml_predictor.set_data_engine(self.data_engine)
 
-            self.execution_engine = ExecutionEngine(self.client, self.risk_manager)
+            self.execution_engine = ExecutionEngine(self.client, self.risk_manager, self.telegram_bot)
             
             self.error_handler = ErrorHandler(self.telegram_bot)
             self.database = TradingDatabase()
             self.emergency_protocols = EmergencyProtocols(self.execution_engine, self.telegram_bot)
             self.strategy_optimizer = StrategyOptimizer(self.database)
             self.backtester = AdvancedBacktester(self.strategy_orchestrator)
+            
+            self.position_manager = PositionManager(
+                self.execution_engine,
+                self.strategy_orchestrator,
+                self.data_engine,
+                self.risk_manager,
+                self.database,
+                self.error_handler,
+                self.telegram_bot
+            )
             
             self.client.set_error_handler(self.error_handler)
             self.data_engine.set_error_handler(self.error_handler)
@@ -252,6 +263,87 @@ class AdvancedTradingBot:
                 
         except Exception as e:
             self.logger.error(f"Error monitoring system health: {e}")
+
+    def _check_data_freshness(self):
+        """Check if data is being updated properly - add this to your class"""
+        current_time = pd.Timestamp.now()
+        freshness_issues = []
+        
+        try:
+            with self.data_engine.data_lock:
+                for symbol, df in self.data_engine.historical_data.items():
+                    if df is None or df.empty:
+                        freshness_issues.append(f"{symbol}: No data")
+                        continue
+                        
+                    last_timestamp = df.index[-1] if hasattr(df.index, '__len__') and len(df.index) > 0 else None
+                    if last_timestamp is None:
+                        freshness_issues.append(f"{symbol}: No valid timestamps")
+                        continue
+                        
+                    time_diff = (current_time - last_timestamp).total_seconds() / 60  # minutes
+                    
+                    if time_diff > 10:  # More than 10 minutes old
+                        freshness_issues.append(f"{symbol}: Data is {time_diff:.1f} minutes old")
+                        
+                    # Check if data is changing
+                    if len(df) > 1:
+                        recent_changes = df['close'].iloc[-5:].nunique()  # Check last 5 candles
+                        if recent_changes == 1:
+                            freshness_issues.append(f"{symbol}: No price changes in last 5 candles")
+        
+            if freshness_issues:
+                self.logger.warning(f"Data freshness issues:\n" + "\n".join(freshness_issues))
+                return False
+            else:
+                self.logger.debug("All data streams are fresh")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error checking data freshness: {e}")
+            return False
+
+    def emergency_data_refresh(self):
+        """Force refresh all symbol data if stuck"""
+        print("🔄 EMERGENCY DATA REFRESH - Fetching fresh data via REST API...")
+        
+        for symbol in SYMBOLS:
+            try:
+                # Force fetch new data via REST API
+                fresh_data = self.data_engine.get_historical_data(symbol, TIMEFRAME, limit=100)
+                if fresh_data is not None and not fresh_data.empty:
+                    print(f"✅ Refreshed {symbol}: {len(fresh_data)} candles, latest: {fresh_data.index[-1]}")
+                else:
+                    print(f"❌ Failed to refresh {symbol}")
+            except Exception as e:
+                print(f"❌ Error refreshing {symbol}: {e}")
+
+    def _debug_data_status(self):
+        """Debug method to check data status - call this in your cycle"""
+        symbol = "BTCUSDT"  # Test with one symbol
+        print(f"\n=== DATA DEBUG {pd.Timestamp.now()} ===")
+        
+        # Check data freshness
+        data = self.data_engine.get_market_data_for_analysis(symbol)
+        if data is not None and not data.empty:
+            print(f"Data length: {len(data)}")
+            print(f"Last 3 timestamps: {data.index[-3:]}")
+            print(f"Last 3 closes: {data['close'].iloc[-3:].tolist()}")
+            print(f"Unique closes in entire dataset: {data['close'].nunique()}")
+            
+            # Check time since last candle
+            current_time = pd.Timestamp.now()
+            time_since_last = (current_time - data.index[-1]).total_seconds() / 60
+            print(f"Time since last candle: {time_since_last:.1f} minutes")
+            
+            # Check WebSocket status
+            ws_status = self.data_engine.client.get_websocket_status()
+            print(f"Public WS Connected: {ws_status['public']['connected']}")
+            print(f"Last Public Message: {ws_status['public']['last_message_ago']:.1f}s ago")
+            print(f"Public Subscriptions: {ws_status['public']['subscriptions']}")
+        else:
+            print(f"=== NO DATA for {symbol} ===")
+        print("=== END DATA DEBUG ===")
 
     def _validate_configuration(self):
         print("🔍 Validating configuration...")
@@ -646,6 +738,54 @@ class AdvancedTradingBot:
             data_access_duration = time.time() - data_access_start
             print(f"   Accessed data for {valid_data_count}/{len(SYMBOLS)} symbols in {data_access_duration:.2f}s")
             
+            # --- START WS HEALTH & DATA STALENESS CHECK ---
+            try:
+                ws_status = self.client.get_websocket_status()
+                public_status = ws_status.get('public', {})
+                last_msg_ago = public_status.get('last_message_ago', 999)
+                is_connected = public_status.get('connected', False)
+                
+                self.logger.info(f"WS Health Check: Connected={is_connected}, LastMsg={last_msg_ago:.1f}s ago")
+
+                is_stale = False
+                if all_symbol_data_copies:
+                    first_symbol_data = next(iter(all_symbol_data_copies.values()), None)
+                    if first_symbol_data is not None and not first_symbol_data.empty:
+                        last_ts = first_symbol_data.index[-1]
+                        time_diff_seconds = (datetime.now() - last_ts).total_seconds()
+                        
+                        if time_diff_seconds > (int(TIMEFRAME) * 60 * 2): # Stale if older than 2 candles
+                            self.logger.warning(f"Data is stale! Last candle timestamp: {last_ts} ({time_diff_seconds/60:.1f} minutes old)")
+                            is_stale = True
+
+                if last_msg_ago > 120 or (is_stale and is_connected):
+                    self.logger.error(f"WebSocket appears unresponsive (Silent: {last_msg_ago:.1f}s, Stale: {is_stale}). Forcing WS restart and data refresh...")
+                    print("🔄 EMERGENCY DATA REFRESH - Restarting WebSocket and fetching fresh data...")
+                    
+                    if self.telegram_bot:
+                        self.telegram_bot.log_important_event("WebSocket Restart", f"Forcing WS restart. Last message: {last_msg_ago:.1f}s ago. Data stale: {is_stale}.")
+                    
+                    # 1. FORCE RESTART THE DEAD WEBSOCKET
+                    self.client.restart_websocket('public')
+                    print("   🔌 WebSocket restart initiated. Pausing 5s for reconnection...")
+                    time.sleep(5)
+                    
+                    # 2. REFRESH DATA VIA REST API
+                    for symbol in SYMBOLS:
+                        refreshed_data = self.data_engine.get_historical_data(symbol, TIMEFRAME, limit=200)
+                        if refreshed_data is not None and not refreshed_data.empty:
+                            all_symbol_data_copies[symbol] = refreshed_data
+                            print(f"   ✅ Refreshed {symbol}: {len(refreshed_data)} candles, latest: {refreshed_data.index[-1]}")
+                        else:
+                            self.logger.warning(f"Failed to refresh data for {symbol} even after WS restart.")
+                            if symbol in all_symbol_data_copies:
+                                del all_symbol_data_copies[symbol] # Remove stale data
+
+            except Exception as health_e:
+                self.logger.error(f"Error during WS health check: {health_e}", exc_info=True)
+            # --- END WS HEALTH & DATA STALENESS CHECK ---
+
+            valid_data_count = len(all_symbol_data_copies)
             if valid_data_count == 0:
                 print("🚫 No valid market data available for any symbol. Skipping cycle.")
                 return []
@@ -668,6 +808,12 @@ class AdvancedTradingBot:
             account_fetch_duration = time.time() - account_fetch_start
             print(f"   Account data fetch complete in {account_fetch_duration:.2f}s")
 
+            print("🔄 Synchronizing ExecutionEngine cache with REST API data...")
+            try:
+                self.execution_engine.update_position_cache_from_rest(account_info.get('positions', {}))
+            except Exception as e:
+                self.logger.error(f"Failed to sync ExecutionEngine cache: {e}", exc_info=True)
+
             print("🔍 Reconciling open positions with exchange...")
             recon_start = time.time()
             try:
@@ -677,6 +823,9 @@ class AdvancedTradingBot:
             except Exception as recon_e:
                 self.logger.error(f"Reconciliation failed: {recon_e}", exc_info=True)
                 self.error_handler.handle_api_error(recon_e, "reconciliation_cycle")
+
+            if hasattr(self, 'cycle_count') and self.cycle_count > 1:
+                self.position_manager.manage_open_positions()
 
             if self.should_run_advanced_analysis():
                 print("🔬 Running Phase 4: Advanced Portfolio Analysis...")
@@ -840,7 +989,9 @@ class AdvancedTradingBot:
                     quality_rating = decision.get('trade_quality', {}).get('quality_rating', 'UNKNOWN')
                     print(f"      🏆 Trade Quality: {quality_rating}")
 
-                if action != 'HOLD' and confidence >= min_confidence:
+                should_execute = decision.get('should_execute', False)
+
+                if action != 'HOLD' and confidence >= min_confidence and should_execute:
                     try:
                         risk_check = self.risk_manager.can_trade(symbol, decision['position_size'], market_data=None) 
 
@@ -910,7 +1061,18 @@ class AdvancedTradingBot:
                             self.telegram_bot.log_error(error_msg, f"Execution - {symbol}")
 
                 elif action != 'HOLD':
-                    print(f"      ⚠️ Skipping trade - confidence {confidence:.1f}% below minimum {min_confidence}%")
+                    # --- FIX: Log the actual reason the trade was skipped ---
+                    reason = decision.get('execute_reason', 'Reason not specified')
+                    if not should_execute:
+                        # This handles ML veto, volume filter, alignment, etc.
+                        print(f"      ⚠️ Skipping trade for {symbol}: {reason}")
+                    elif confidence < min_confidence:
+                        # This handles the low confidence case
+                        print(f"      ⚠️ Skipping trade for {symbol}: Confidence {confidence:.1f}% is below minimum {min_confidence}%")
+                    else:
+                        # Fallback for an unknown skip reason
+                        print(f"      ⚠️ Skipping trade for {symbol}. Reason: {reason} (Conf: {confidence:.1f}%, Exec: {should_execute})")
+                    # --- END FIX ---
             
             execution_duration = time.time() - execution_start
             print(f"   Execution attempts complete in {execution_duration:.2f}s")
@@ -1132,6 +1294,12 @@ class AdvancedTradingBot:
                         if update_success:
                             self.logger.info(f"✅ Reconciled trade {trade_id} for {symbol} with PnL ${trade_pnl_usdt:.2f} (Match score: {best_match_score:.2f})")
                             reconciled_count += 1
+                            if self.telegram_bot:
+                                self.telegram_bot.log_reconciliation_close(
+                                    symbol,
+                                    trade_pnl_usdt,
+                                    trade_pnl_percent
+                                )
                         else:
                             self.logger.error(f"❌ Failed to update trade {trade_id} in DB")
                     else:
@@ -1497,6 +1665,9 @@ def main():
                     bot.cycle_count = cycle_count
 
                     print(f"\n⏰ Preparing for cycle {cycle_count}...")
+
+                    if cycle_count > 1:
+                        bot.position_manager.manage_open_positions()
                     
                     print(f"\n{'='*70}")
                     print(f"📈 LIVE TRADING CYCLE #{cycle_count}")

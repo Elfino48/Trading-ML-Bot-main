@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from execution_engine import ExecutionEngine
 from telegram_bot import TelegramBot
+from config import EMERGENCY_PROTOCOLS_ENABLED
 
 class EmergencyProtocols:
     """
@@ -15,6 +16,7 @@ class EmergencyProtocols:
         self.execution_engine = execution_engine
         self.telegram_bot = telegram_bot
         self.emergency_mode = False
+        self.enabled = EMERGENCY_PROTOCOLS_ENABLED
         self.emergency_start_time = None
         self.triggered_protocols = []
         
@@ -40,6 +42,9 @@ class EmergencyProtocols:
         """
         Check for emergency conditions that require immediate action
         """
+        if not self.enabled:
+            return {'emergency': False, 'reason': 'Emergency protocols disabled via config'}
+            
         if self.emergency_mode:
             return {'emergency': True, 'reason': 'Already in emergency mode'}
         
@@ -380,6 +385,12 @@ class EmergencyProtocols:
         self.large_loss_count = 0
         self.trading_error_count = 0 # Added reset for trading error count
         
+        # --- THIS IS THE FIX ---
+        if self.execution_engine:
+            self.execution_engine.clear_trade_history()
+            self.logger.info("Cleared ExecutionEngine trade failure history to prevent reset loop.")
+        # --- END FIX ---
+
         self.logger.info(f"Emergency mode reset: {reason}")
         
         if self.telegram_bot:

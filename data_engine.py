@@ -277,83 +277,113 @@ class DataEngine:
                             'volume24h': float(data.get('volume24h', 0)),
                             'turnover24h': float(data.get('turnover24h', 0))
                         }
+                        
                 elif topic.startswith("kline."):
                     if isinstance(data, list) and len(data) > 0:
                         parts = topic.split('.')
                         interval_str = parts[1]
                         symbol = parts[2]
 
-                        if symbol in self.historical_data:
-                            df = self.historical_data[symbol]
-
-                            for kline_dict in data:
-                                self.logger.debug(f"WS Kline Received Dict: {kline_dict}") # ADDED DEBUG LOG
-                                ts = pd.to_datetime(int(kline_dict.get('start', 0)), unit='ms')
-                                if ts == 0: continue
-
-                                close_price_str = kline_dict.get('close')
-                                if close_price_str is None or float(close_price_str) <= 0:
-                                    self.logger.warning(f"WS received invalid close price {close_price_str} for {symbol} at {ts}. Skipping update for this kline.")
-                                    continue # Indent this line
+                        if symbol not in self.historical_data:
+                            self.logger.warning(f"No historical data found for {symbol}, skipping WS update")
+                            return
+                            
+                        # Get a working copy of the DataFrame
+                        current_df = self.historical_data[symbol].copy()
+                        
+                        for kline_dict in data:
+                            self.logger.debug(f"WS Kline Received Dict: {kline_dict}")
+                            
+                            # More robust timestamp parsing
+                            start_time = kline_dict.get('start')
+                            if not start_time:
+                                self.logger.warning(f"No start time in kline data for {symbol}")
+                                continue
                                 
-                                new_kline_data = {
-                                    'timestamp': ts,
-                                    'open': float(kline_dict.get('open', 0)),
-                                    'high': float(kline_dict.get('high', 0)),
-                                    'low': float(kline_dict.get('low', 0)),
-                                    'close': float(close_price_str), # Use the validated price
-                                    'volume': float(kline_dict.get('volume', 0)),
-                                    'turnover': float(kline_dict.get('turnover', 0))
-                                }
+                            try:
+                                ts = pd.to_datetime(int(start_time), unit='ms')
+                            except (ValueError, TypeError) as e:
+                                self.logger.warning(f"Invalid timestamp {start_time} for {symbol}: {e}")
+                                continue
+
+                            # Validate price data
+                            close_price_str = kline_dict.get('close')
+                            if close_price_str is None or float(close_price_str) <= 0:
+                                self.logger.warning(f"Invalid close price {close_price_str} for {symbol} at {ts}")
+                                continue
                                 
-                                self.logger.debug(f"WS Kline Parsed Data for {ts}: {new_kline_data}") # ADDED DEBUG LOG
+                            new_kline_data = {
+                                'timestamp': ts,
+                                'open': float(kline_dict.get('open', 0)),
+                                'high': float(kline_dict.get('high', 0)),
+                                'low': float(kline_dict.get('low', 0)),
+                                'close': float(close_price_str),
+                                'volume': float(kline_dict.get('volume', 0)),
+                                'turnover': float(kline_dict.get('turnover', 0))
+                            }
+                            
+                            self.logger.info(f"Processing WS kline for {symbol} at {ts}: close={new_kline_data['close']}")
 
-                                if not df.empty and isinstance(df.index, pd.DatetimeIndex) and df.index[-1] == ts:
-                                    last_index_ts = df.index[-1]
-                                    for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
-                                        if col in new_kline_data:
-                                            df.loc[last_index_ts, col] = new_kline_data[col]
-                                    df_updated = df # Reference updated df
-
-                                elif df.empty or (isinstance(df.index, pd.DatetimeIndex) and ts > df.index[-1]):
-                                    new_row_df = pd.DataFrame([new_kline_data])
-                                    was_indexed = isinstance(df.index, pd.DatetimeIndex)
-                                    if was_indexed:
-                                        df_temp = df.reset_index()
-                                    else:
-                                        df_temp = df
-
-                                    if not df_temp.empty:
-                                        missing_cols = set(df_temp.columns) - set(new_row_df.columns)
-                                        for c in missing_cols: new_row_df[c] = np.nan
-                                        missing_cols_new = set(new_row_df.columns) - set(df_temp.columns)
-                                        for c in missing_cols_new: df_temp[c] = np.nan
-
-                                    df_combined = pd.concat([df_temp, new_row_df], ignore_index=True)
-
-                                    if 'timestamp' in df_combined.columns:
-                                        df_combined = df_combined.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
-                                        df_combined = df_combined.set_index('timestamp')
-                                    else:
-                                        self.logger.error(f"Critical error: 'timestamp' column missing during concat for {symbol}")
-                                        continue
-
-                                    if len(df_combined) > 1000:
-                                        df_combined = df_combined.iloc[-1000:]
-
-                                    self.historical_data[symbol] = df_combined
-                                    df_updated = df_combined # Reference updated df
-                                else:
-                                    df_updated = df # No update happened for this kline_dict
-
-
-                                # --- ADDED DEBUG LOG (runs after potential update/append) ---
-                                # Check df_updated exists and has data before logging tail
-                                if 'df_updated' in locals() and df_updated is not None and not df_updated.empty:
-                                    self.logger.debug(f"WS Kline Post-Update DF Tail for {symbol}:\n{df_updated.tail(3)}")
-                                # --- END ADDED DEBUG LOG ---
+                            # Check if we need to update last candle or append new one
+                            if not current_df.empty and ts in current_df.index:
+                                # Update existing candle
+                                for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
+                                    if col in new_kline_data:
+                                        current_df.loc[ts, col] = new_kline_data[col]
+                                self.logger.info(f"Updated existing candle for {symbol} at {ts}")
+                                
+                            elif current_df.empty or ts > current_df.index[-1]:
+                                # Append new candle
+                                new_row = pd.DataFrame([new_kline_data]).set_index('timestamp')
+                                current_df = pd.concat([current_df, new_row])
+                                current_df = current_df[~current_df.index.duplicated(keep='last')]
+                                current_df = current_df.sort_index()
+                                
+                                # Limit size
+                                if len(current_df) > 1000:
+                                    current_df = current_df.iloc[-1000:]
+                                    
+                                self.logger.info(f"Appended new candle for {symbol} at {ts}. New length: {len(current_df)}")
+                                
+                            else:
+                                self.logger.warning(f"Out-of-order timestamp for {symbol}: {ts} vs last {current_df.index[-1] if not current_df.empty else 'None'}")
+                        
+                        # Update the stored DataFrame
+                        self.historical_data[symbol] = current_df
+                        self.logger.info(f"Updated {symbol} data. Latest close: {current_df['close'].iloc[-1] if not current_df.empty else 'N/A'}")
+                        
         except Exception as e:
             self.logger.error(f"Error handling WS message: {type(e).__name__} - {e} | Topic: {topic}", exc_info=True)
+
+    def check_data_freshness(self):
+        """Check if data is being updated properly"""
+        current_time = pd.Timestamp.now()
+        freshness_issues = []
+        
+        with self.data_lock:
+            for symbol, df in self.historical_data.items():
+                if df is None or df.empty:
+                    freshness_issues.append(f"{symbol}: No data")
+                    continue
+                    
+                last_timestamp = df.index[-1]
+                time_diff = (current_time - last_timestamp).total_seconds() / 60  # minutes
+                
+                if time_diff > 10:  # More than 10 minutes old
+                    freshness_issues.append(f"{symbol}: Data is {time_diff:.1f} minutes old")
+                    
+                # Check if data is changing
+                if len(df) > 1:
+                    recent_changes = df['close'].iloc[-5:].nunique()  # Check last 5 candles
+                    if recent_changes == 1:
+                        freshness_issues.append(f"{symbol}: No price changes in last 5 candles")
+        
+        if freshness_issues:
+            self.logger.warning(f"Data freshness issues:\n" + "\n".join(freshness_issues))
+            return False
+        else:
+            self.logger.info("All data streams are fresh")
+            return True
 
     def validate_market_data(self, df: pd.DataFrame) -> bool:
         """Comprehensive market data validation (mostly unchanged)"""

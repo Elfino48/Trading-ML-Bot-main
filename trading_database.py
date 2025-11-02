@@ -79,6 +79,7 @@ class TradingDatabase:
                     ml_prediction_details TEXT,
                     technical_indicators_json TEXT,
                     outcome_updated INTEGER DEFAULT 0,
+                    flags TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -288,10 +289,42 @@ class TradingDatabase:
             if self.connection: self.connection.rollback()
             raise
 
+    def get_trade_flags(self, trade_id: int) -> Dict:
+        try:
+            query = "SELECT flags FROM trades WHERE id = ?"
+            self.cursor.execute(query, (trade_id,))
+            row = self.cursor.fetchone()
+            
+            if row and row['flags']:
+                return json.loads(row['flags'])
+            else:
+                return {}
+        except Exception as e:
+            self.logger.error(f"Error getting flags for trade {trade_id}: {e}", exc_info=True)
+            return {}
+
+    def set_trade_flag(self, trade_id: int, flag_name: str, flag_value: Any) -> bool:
+        try:
+            current_flags = self.get_trade_flags(trade_id)
+            current_flags[flag_name] = flag_value
+            flags_json = json.dumps(current_flags, cls=NpEncoder)
+            
+            cursor = self.connection.cursor()
+            cursor.execute('UPDATE trades SET flags = ? WHERE id = ?', (flags_json, trade_id))
+            self.connection.commit()
+            
+            self.logger.info(f"Set flag '{flag_name}' for trade {trade_id}")
+            return cursor.rowcount > 0
+        except Exception as e:
+            self.logger.error(f"Error setting flag for trade {trade_id}: {e}", exc_info=True)
+            if self.connection: self.connection.rollback()
+            return False
+
     def _add_missing_columns_if_needed(self):
         # List of columns to check/add to the trades table
         trades_migrations = [
-            ('outcome_updated', 'INTEGER DEFAULT 0')
+            ('outcome_updated', 'INTEGER DEFAULT 0'),
+            ('flags', 'TEXT')
         ]
         
         # List of columns to check/add to the ml_model_performance table (as per schema update)
@@ -769,6 +802,27 @@ class TradingDatabase:
             self.logger.error(f"Failed to store model health: {e}")
             if self.connection: self.connection.rollback()
             return False
+
+    def get_open_trade_for_symbol(self, symbol: str) -> Optional[Dict]:
+        try:
+            query = """
+                SELECT * FROM trades
+                WHERE symbol = ? 
+                  AND exit_price IS NULL
+                  AND success = 'True'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """
+            self.cursor.execute(query, (symbol,))
+            row = self.cursor.fetchone()
+            
+            if row:
+                return dict(row)
+            else:
+                return None
+        except Exception as e:
+            self.logger.error(f"Error getting open trade for {symbol}: {e}", exc_info=True)
+            return None
 
     def store_feature_importance(self, symbol: str, model_type: str,
                                  feature_importance: Dict[str, float]) -> bool:

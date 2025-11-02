@@ -125,6 +125,15 @@ class EnhancedStrategyOrchestrator:
             log_entry.append(f"Composite Score: {decision.get('composite_score', 0):.4f}")
             log_entry.append(f"Trade Quality: {decision.get('trade_quality', {}).get('quality_rating', 'N/A')} ({decision.get('trade_quality', {}).get('quality_score', 0)})")
 
+            # --- NEW: Log execution check ---
+            should_execute = decision.get('should_execute', False)
+            execute_reason = decision.get('execute_reason', 'N/A')
+            log_entry.append(f"\n[EXECUTION CHECK]")
+            log_entry.append(f"  - Should Execute: {should_execute}")
+            if not should_execute:
+                log_entry.append(f"  - Reason: {execute_reason}")
+            # --- END NEW ---
+
             log_entry.append(f"\n[SCORE BREAKDOWN]")
             log_entry.append(f"  - Trend Score:      {decision.get('trend_score', 0):.4f}")
             log_entry.append(f"  - Mean Rev Score:   {decision.get('mr_score', 0):.4f}")
@@ -1468,6 +1477,30 @@ class EnhancedStrategyOrchestrator:
         
         return base_weights
     
+    def _normalize_score(self, score: float, strategy_type: str) -> float:
+        """
+        Normalizes a raw strategy score to a standard -100 to 100 scale.
+        """
+        # Define the *actual* max absolute score for each strategy based on its code
+        strategy_max_abs_score = {
+            'trend': 80.0,      # Clamped at 80 in _trend_following_strategy
+            'mr': 115.0,        # Theoretical max (60+40+15)
+            'breakout': 70.0,   # Clamped at 70 in _breakout_strategy
+            'ml': 80.0,         # Max is 80 * 1.0 confidence
+            'mtf': 50.0         # Max is 1 * 50 * 1.0 strength
+        }
+        
+        max_score = strategy_max_abs_score.get(strategy_type, 100.0)
+        
+        if max_score == 0:
+            return 0.0
+            
+        # Clamp the score to the defined range first
+        clamped_score = max(-max_score, min(max_score, score))
+        
+        # Normalize to a -100 to 100 range
+        return (clamped_score / max_score) * 100.0
+
     def _adjust_for_performance(self, base_weights: Dict[str, float], recent_performance: Dict) -> Dict[str, float]:
         if not recent_performance:
             return base_weights
@@ -1705,49 +1738,55 @@ class EnhancedStrategyOrchestrator:
                                             aggressiveness: str) -> Dict[str, float]:
         """Calculates composite score using individual strategies and returns breakdowns."""
         try:
-            # Get dynamically optimized weights
-            optimized_weights = self._integrate_strategy_optimizer(
-                indicators.get('symbol', 'UNKNOWN'), indicators, None
-            )
-
-            ml_confidence = ml_result.get('confidence', 0)
-            
-            if ml_confidence < 0.7:
-                ml_weight_multiplier = 0.5
+            # 1. Define base weights that sum to 1.0
+            # We prioritize optimized weights if they exist, otherwise use aggressiveness defaults.
+            if self.strategy_optimizer:
+                optimized_weights = self._integrate_strategy_optimizer(
+                    indicators.get('symbol', 'UNKNOWN'), indicators, None
+                )
             else:
-                ml_weight_multiplier = 1.0 
+                optimized_weights = None
 
-            # Use optimized weights if available, otherwise fallback to aggressiveness-based weights
             if optimized_weights and any(optimized_weights.values()):
                 weights = optimized_weights
-                weights['mtf'] = 0.10  # Add MTF weight
+                # Ensure MTF is included if optimizer doesn't provide it
+                if 'mtf' not in weights:
+                    weights['mtf'] = 0.10
+                    # Re-normalize if we had to add MTF
+                    total_w = sum(weights.values())
+                    if total_w > 0:
+                        weights = {k: v / total_w for k, v in weights.items()}
             else:
-                # Fallback to original aggressiveness-based weights
+                # Fallback to aggressiveness-based weights (now summing to 1.0)
                 if aggressiveness == "conservative":
                     weights = {
-                        'trend_following': 0.40, 'mean_reversion': 0.30,
-                        'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10
+                        'trend_following': 0.35, 'mean_reversion': 0.25,
+                        'breakout': 0.15, 'ml_prediction': 0.15, 'mtf': 0.10
                     }
                 elif aggressiveness == "moderate":
                     weights = {
-                        'trend_following': 0.25, 'mean_reversion': 0.35,
-                        'breakout': 0.20, 'ml_prediction': 0.20, 'mtf': 0.10
+                        'trend_following': 0.25, 'mean_reversion': 0.30,
+                        'breakout': 0.20, 'ml_prediction': 0.15, 'mtf': 0.10
                     }
                 elif aggressiveness == "aggressive":
                     weights = {
-                        'trend_following': 0.20, 'mean_reversion': 0.40,
+                        'trend_following': 0.20, 'mean_reversion': 0.30,
                         'breakout': 0.25, 'ml_prediction': 0.15, 'mtf': 0.10
                     }
                 elif aggressiveness == "high": 
                     weights = {
-                        'trend_following': 0.15, 'mean_reversion': 0.45,
-                        'breakout': 0.30, 'ml_prediction': 0.10, 'mtf': 0.10
+                        'trend_following': 0.15, 'mean_reversion': 0.35,
+                        'breakout': 0.25, 'ml_prediction': 0.15, 'mtf': 0.10
                     }
                 else:
                     weights = {
-                        'trend_following': 0.40, 'mean_reversion': 0.30,
-                        'breakout': 0.20, 'ml_prediction': 0.10, 'mtf': 0.10
+                        'trend_following': 0.35, 'mean_reversion': 0.25,
+                        'breakout': 0.15, 'ml_prediction': 0.15, 'mtf': 0.10
                     }
+
+            # 2. Adjust ML weight based on confidence
+            ml_confidence = ml_result.get('confidence', 0)
+            ml_weight_multiplier = 0.5 if ml_confidence < 0.7 else 1.0
 
             original_ml_weight = weights.get('ml_prediction', 0)
             reduced_ml_weight = original_ml_weight * ml_weight_multiplier
@@ -1761,57 +1800,77 @@ class EnhancedStrategyOrchestrator:
                     if k != 'ml_prediction':
                         proportion = weights[k] / other_weights_total
                         weights[k] += weight_difference * proportion
-            self.logger.debug(f"[{indicators.get('symbol', 'UNK')}] Weights after ML reduction & re-normalization: {weights}")
-
-            # Calculate individual strategy scores
-            trend_score = self._trend_following_strategy(indicators)
-            mean_reversion_score = self._mean_reversion_strategy(indicators)
-            breakout_score = self._breakout_strategy(indicators, mtf_signals)
             
-            # FIXED ML Score calculation
-            ml_raw_pred = ml_result.get('raw_prediction', 0)
-            ml_confidence = ml_result.get('confidence', 0)
-            
-            # Scale based on prediction strength and confidence
-            if ml_raw_pred == 2:   # Strong buy
-                ml_score = 80 * ml_confidence
-            elif ml_raw_pred == 1: # Buy
-                ml_score = 40 * ml_confidence
-            elif ml_raw_pred == -1: # Sell
-                ml_score = -40 * ml_confidence
-            elif ml_raw_pred == -2: # Strong sell
-                ml_score = -80 * ml_confidence
-            else:                  # Hold
-                ml_score = 0
-
-            # Multi-timeframe score calculation
-            mtf_alignment = mtf_signals.get('timeframe_alignment', 0)
-            mtf_strength = mtf_signals.get('alignment_strength', 0.5)
-            mtf_score = mtf_alignment * 50 * mtf_strength
-
-            # Normalize weights
-            total_weight = sum(weights.values())
-            if total_weight > 0:
-                normalized_weights = {k: v / total_weight for k, v in weights.items()}
+            # Ensure weights still sum to 1 after adjustment
+            total_final_weight = sum(weights.values())
+            if total_final_weight > 0:
+                normalized_weights = {k: v / total_final_weight for k, v in weights.items()}
             else:
                 normalized_weights = weights
 
-            # Calculate composite score using normalized weights
+            self.logger.debug(f"[{indicators.get('symbol', 'UNK')}] Final normalized weights: {normalized_weights}")
+
+            # 3. Calculate individual raw scores
+            trend_score_raw = self._trend_following_strategy(indicators)
+            mean_reversion_score_raw = self._mean_reversion_strategy(indicators)
+            breakout_score_raw = self._breakout_strategy(indicators, mtf_signals)
+            
+            ml_raw_pred = ml_result.get('raw_prediction', 0)
+            ml_confidence_pred = ml_result.get('confidence', 0)
+            
+            if ml_raw_pred == 2:   # Strong buy
+                ml_score_raw = 80 * ml_confidence_pred
+            elif ml_raw_pred == 1: # Buy
+                ml_score_raw = 40 * ml_confidence_pred
+            elif ml_raw_pred == -1: # Sell
+                ml_score_raw = -40 * ml_confidence_pred
+            elif ml_raw_pred == -2: # Strong sell
+                ml_score_raw = -80 * ml_confidence_pred
+            else:                  # Hold
+                ml_score_raw = 0.0 # HOLD prediction should be neutral, not a penalty
+
+            mtf_alignment = mtf_signals.get('timeframe_alignment', 0)
+            mtf_strength = mtf_signals.get('alignment_strength', 0.5)
+            mtf_score_raw = mtf_alignment * 50 * mtf_strength
+
+            # 4. Normalize all scores to a -100 to 100 scale
+            trend_score_norm = self._normalize_score(trend_score_raw, 'trend')
+            mr_score_norm = self._normalize_score(mean_reversion_score_raw, 'mr')
+            breakout_score_norm = self._normalize_score(breakout_score_raw, 'breakout')
+            ml_score_norm = self._normalize_score(ml_score_raw, 'ml')
+            mtf_score_norm = self._normalize_score(mtf_score_raw, 'mtf')
+
+            # 5. Calculate final composite score
             composite = (
-                trend_score * normalized_weights.get('trend_following', 0) +
-                mean_reversion_score * normalized_weights.get('mean_reversion', 0) +
-                breakout_score * normalized_weights.get('breakout', 0) +
-                ml_score * normalized_weights.get('ml_prediction', 0) +
-                mtf_score * normalized_weights.get('mtf', 0)
+                trend_score_norm * normalized_weights.get('trend_following', 0) +
+                mr_score_norm * normalized_weights.get('mean_reversion', 0) +
+                breakout_score_norm * normalized_weights.get('breakout', 0) +
+                ml_score_norm * normalized_weights.get('ml_prediction', 0) +
+                mtf_score_norm * normalized_weights.get('mtf', 0)
             )
 
+            # Return raw scores for logging, but composite score is normalized
             return {
                 'composite_score': composite,
-                'trend_score': trend_score,
-                'mr_score': mean_reversion_score,
-                'breakout_score': breakout_score,
-                'ml_score': ml_score,
-                'mtf_score': mtf_score
+                'trend_score': trend_score_raw,
+                'mr_score': mean_reversion_score_raw,
+                'breakout_score': breakout_score_raw,
+                'ml_score': ml_score_raw,
+                'mtf_score': mtf_score_raw
+            }
+
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                symbol = indicators.get('symbol', 'ALL') if isinstance(indicators, dict) else 'ALL'
+                self.logger.error(f"[{symbol}] Error calculating composite score: {e}", exc_info=True)
+
+            if self.error_handler:
+                symbol = indicators.get('symbol', 'ALL') if isinstance(indicators, dict) else 'ALL'
+                self.error_handler.handle_trading_error(e, symbol, "composite_score_calculation")
+
+            return {
+                'composite_score': 0, 'trend_score': 0, 'mr_score': 0,
+                'breakout_score': 0, 'ml_score': 0, 'mtf_score': 0
             }
 
         except Exception as e:
@@ -2105,21 +2164,13 @@ class EnhancedStrategyOrchestrator:
         if action == 'SELL' and trend_score > sell_threshold:
             return False, f"Trend score {trend_score} above {regime} sell threshold {sell_threshold}"
         
-        # ML VETO WITH TREND CONTEXT
         if ml_confidence > 0.75:
-            # Stronger veto if trend is also weak
-            if (action == 'BUY' and ml_prediction <= 0) and trend_score < 25:
-                return False, f"ML veto + weak trend: {trend_score}"
-            
-            if (action == 'SELL' and ml_prediction >= 1) and trend_score > -25:
-                return False, f"ML veto + weak trend: {trend_score}"
+            if (action == 'BUY' and ml_prediction <= 0) or (action == 'SELL' and ml_prediction >= 0):
+                return False, f"High-confidence ML veto (conf: {ml_confidence:.1%}, pred: {ml_prediction})"
         
-        # [Rest of your standard filters...]
-        if abs(composite_score) < 15:
-            return False, f"Composite score too weak: {composite_score}"
-        
-        if decision['confidence'] < 40:
-            return False, f"Confidence too low: {decision['confidence']}%"
+        # Add signal alignment requirement
+        if not decision.get('signal_alignment', {}).get('aligned', False):
+            return False, "Signals not aligned across strategies"
         
         return True, "Execution approved"
 

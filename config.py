@@ -29,6 +29,9 @@ SYMBOLS = os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT,
 TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "15")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 
+
+# Add this near your other bot parameters (like DEBUG_MODE)
+EMERGENCY_PROTOCOLS_ENABLED = os.getenv("EMERGENCY_PROTOCOLS_ENABLED", "True").lower() == "true"
 # --- NEW: RISK MULTIPLIER ---
 # Set this to 1.0 for normal trading.
 # Set to 10.0 to use 10x your equity for position sizing and exposure calculations.
@@ -61,14 +64,14 @@ class RiskConfig:
         },
         "moderate": {
             "min_confidence": 25,
-            "max_position_size_usdt": 300,
+            "max_position_size_usdt": 700,
             "max_daily_loss_percent": 8,
             "global_stop_loss_percent": 3,
             "base_size_percent": 0.03,
             "kelly_multiplier": 0.15,
             "sl_atr_multiple": 1.5,
             "tp_atr_multiple": 2.5,
-            "max_sl_percent": 4,
+            "max_sl_percent": 6,
             "buy_threshold": 15,
             "sell_threshold": -15,
             "strong_threshold": 30,

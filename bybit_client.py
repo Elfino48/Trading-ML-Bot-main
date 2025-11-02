@@ -158,7 +158,11 @@ class BybitClient:
 
             # Prepare URL
             url = f"{self.base_url}{endpoint}"
+            
+            # --- FIX: Append the *exact* sorted query string to the URL ---
+            # 'query_string_for_req' was already built from sorted params
             full_url_for_req = f"{url}?{query_string_for_req}" if query_string_for_req else url
+            # --- END FIX ---
 
             response = None
             response_data = None
@@ -174,14 +178,16 @@ class BybitClient:
 
             # --- Send Request ---
             if http_method == "GET":
-                 # Use `params` argument for requests library with GET
-                 response = requests.get(url, headers=headers, params=params, timeout=10)
+                 # Use the full URL with the sorted query string.
+                 # Pass params=None to prevent 'requests' from re-encoding.
+                 response = requests.get(full_url_for_req, headers=headers, params=None, timeout=10)
             elif http_method == "POST":
                  # Use `data` argument with encoded string body for exact control
                  response = requests.post(url, headers=headers, data=request_body_for_req.encode('utf-8'), timeout=10)
             elif http_method == "DELETE":
                  # DELETE in Bybit V5 often uses query params like GET
-                 response = requests.delete(url, headers=headers, params=params, timeout=10)
+                 # Use the full URL with the sorted query string.
+                 response = requests.delete(full_url_for_req, headers=headers, params=None, timeout=10)
             elif http_method == "PUT":
                  response = requests.put(url, headers=headers, data=request_body_for_req.encode('utf-8'), timeout=10)
 
@@ -902,6 +908,21 @@ class BybitClient:
         # Reset reconnect attempts to allow immediate reconnection
         self._ws_reconnect_attempts[stream_type] = 0
         logger.info(f"{stream_type} WebSocket restart initiated.")
+
+    def set_trading_stop(self, symbol: str, stop_loss: Optional[str] = None, take_profit: Optional[str] = None, category: str = "linear"):
+        """
+        Sets a Stop Loss and/or Take Profit on an existing open position.
+        """
+        params = {
+            "category": category,
+            "symbol": symbol,
+        }
+        if stop_loss:
+            params["stopLoss"] = str(stop_loss)
+        if take_profit:
+            params["takeProfit"] = str(take_profit)
+        
+        return self._request("POST", "/v5/position/trading-stop", params)
 
     def is_websocket_healthy(self, stream_type: str, max_silence: Optional[int] = None):
         """Check if WebSocket connection is healthy based on recent activity."""
