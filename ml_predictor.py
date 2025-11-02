@@ -219,13 +219,17 @@ class MLPredictor:
         if current_idx < lookback:
             return pd.DataFrame()
 
-        current_data = df.iloc[:current_idx+1]
+        historical_data = df.iloc[:current_idx].copy()
         
-        close_prices = current_data['close'].astype(float)
-        high_prices = current_data['high'].astype(float)
-        low_prices = current_data['low'].astype(float)
-        volume = current_data['volume'].astype(float)
-        opens = current_data['open'].astype(float)
+        if len(historical_data) < lookback:
+            return pd.DataFrame()
+            
+        window_data = historical_data.iloc[-lookback:]
+        
+        close_prices = window_data['close'].astype(float)
+        high_prices = window_data['high'].astype(float)
+        low_prices = window_data['low'].astype(float)
+        volume = window_data['volume'].astype(float)
 
         try:
             # 1. Symbol-specific volatility scaling
@@ -234,7 +238,7 @@ class MLPredictor:
             
             # 2. BTC Dominance correlation (enhanced implementation)
             if symbol and symbol != 'BTCUSDT' and hasattr(self, 'data_engine') and self.data_engine and self.btc_correlation_enabled:
-                btc_features = self._calculate_btc_correlation_features(symbol, current_data)
+                btc_features = self._calculate_btc_correlation_features(symbol, historical_data)
                 features.update(btc_features)
             
             # 3. Market cap tier features (now numerical)
@@ -637,11 +641,18 @@ class MLPredictor:
         
         # Get market regime context with symbol-specific adjustments
         close_prices = df['close'].astype(float)
-        if current_idx >= 20:
-            volatility = close_prices.pct_change().rolling(20).std().iloc[current_idx]
-            trend_strength = abs(close_prices.iloc[current_idx] / close_prices.iloc[current_idx-20] - 1)
+        
+        data_up_to_current = df.iloc[:current_idx]
+        if len(data_up_to_current) >= 20:
+            volatility = data_up_to_current['close'].pct_change().rolling(20).std().iloc[-1]
+            trend_strength = abs(data_up_to_current['close'].iloc[-1] / data_up_to_current['close'].iloc[-20] - 1)
         else:
             volatility = 0.02
+            trend_strength = 0
+        
+        if pd.isna(volatility) or volatility == 0:
+            volatility = 0.02
+        if pd.isna(trend_strength):
             trend_strength = 0
         
         # Symbol-specific threshold adjustments
@@ -703,10 +714,10 @@ class MLPredictor:
         
         return configs
 
-    def _get_symbol_thresholds(self, symbol: str, volatility: float) -> Dict[str, float]:
+    def _get_symbol_thresholds(self, symbol: str, volatility: float) -> Dict[str, float]:   
         """Get symbol-specific decision thresholds"""
-        base_strong = 0.20
-        base_weak = 0.10
+        base_strong = 0.15
+        base_weak = 0.05
         
         if symbol in self.symbol_volatility_profiles:
             profile = self.symbol_volatility_profiles[symbol]
@@ -732,10 +743,9 @@ class MLPredictor:
         weak_threshold *= vol_adjustment
         
         return {
-            'strong': max(0.15, min(0.35, strong_threshold)),
-            'weak': max(0.05, min(0.25, weak_threshold))
+            'strong': max(0.10, min(0.25, strong_threshold)),
+            'weak': max(0.03, min(0.15, weak_threshold))
         }
-
     def prepare_training_data_enhanced(self, df: pd.DataFrame, min_samples: int = None, symbol: str = None) -> tuple:
         """Enhanced training data preparation with multi-timeframe targets"""
         if min_samples is None:
@@ -745,21 +755,41 @@ class MLPredictor:
         if max_bars < min_samples + 50:
             return pd.DataFrame(), pd.Series()
         
-        df = df.tail(max_bars)
+        df = df.tail(max_bars).copy()
         
         features_list = []
         targets = []
         
-        # Use stride to reduce autocorrelation
-        stride = max(1, len(df) // 500)
+        stride = max(1, len(df) // 200)
         
-        for i in range(50, len(df) - max([c['periods'] for c in self.target_configs]), stride):
-            features = self.prepare_features_point_in_time(df, i, symbol=symbol)  # Pass symbol here
-            target = self.create_enhanced_target(df, i, symbol)  # Pass symbol here
+        # --- FIX: Determine max target period from the correct config ---
+        if symbol and symbol in self.symbol_volatility_profiles:
+            target_configs = self._get_symbol_specific_target_configs(symbol)
+        else:
+            target_configs = self.target_configs
+        max_target_period = max([c['periods'] for c in target_configs])
+        # --- END FIX ---
+
+        # --- FIX: Align regime filtering inside the feature generation loop ---
+        tradable_regimes = ['bull_trend', 'bear_trend', 'neutral', 'ranging']
+        
+        for i in range(50, len(df) - max_target_period, stride):
             
-            if not features.empty:
-                features_list.append(features.iloc[0])
-                targets.append(target)
+            # --- FIX 2: Calculate regime filter AT point-in-time 'i' ---
+            regime_data_for_features = df.iloc[:i+1]
+            if len(regime_data_for_features) < 100:
+                continue
+            regime = self._detect_training_regime(regime_data_for_features, symbol)
+            
+            # --- FIX 2: Apply filter *before* generating features/targets ---
+            if regime in tradable_regimes:
+                features = self.prepare_features_point_in_time(df, i, symbol=symbol)
+                target = self.create_enhanced_target(df, i, symbol)
+                
+                if not features.empty:
+                    features_list.append(features.iloc[0])
+                    targets.append(target)
+        # --- END FIX 2 ---
         
         if len(features_list) < min_samples:
             return pd.DataFrame(), pd.Series()
@@ -767,7 +797,6 @@ class MLPredictor:
         features_df = pd.DataFrame(features_list).fillna(0)
         target_series = pd.Series(targets, index=features_df.index)
         
-        # Remove constant and highly correlated features
         features_df = self._clean_features(features_df)
         
         return features_df, target_series
@@ -848,9 +877,14 @@ class MLPredictor:
     def train_model(self, symbol: str, df: pd.DataFrame) -> bool:
         """Enhanced training with symbol-specific configuration"""
         try:
+            leakage_report = self.detect_data_leakage(symbol, df)
+            if leakage_report['issues']:
+                print(f"⚠️ Potential data leakage detected for {symbol}:")
+                for issue in leakage_report['issues']:
+                    print(f"   - {issue}")
+            
             print(f"🔄 Training symbol-specific model for {symbol}...")
             
-            # Set symbol-specific configuration
             self._apply_symbol_specific_config(symbol)
             
             training_start = datetime.now()
@@ -858,13 +892,12 @@ class MLPredictor:
             if not hasattr(self, 'model_versions'):
                 self.model_versions = {}
             
-            # Save current model as previous before training new one
             if symbol in self.models:
                 self.previous_models[symbol] = self.models[symbol].copy()
                 self.previous_scalers[symbol] = self.scalers[symbol]
                 print(f"💾 Saved previous model for {symbol} for ensembling")
             
-            # Use enhanced training data with symbol-specific targets
+            # --- FIX 2: Regime filtering is now done inside prepare_training_data_enhanced ---
             features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
             
             if features.empty or target.empty:
@@ -872,34 +905,30 @@ class MLPredictor:
                 self._record_training_failure(symbol, "insufficient_data")
                 return False
                 
-            # Apply symbol-specific feature selection
-            features_selected, selected_features = self._select_features(features, target, symbol)
-            self.feature_importance[symbol]['selected_features'] = selected_features
+            # --- FIX 2: No longer need to call _filter_training_data_by_regime ---
+            # We now use 'features' and 'target' directly as they are already filtered
             
-            # Filter training data by market regime
-            filtered_features, filtered_target = self._filter_training_data_by_regime(features_selected, target, df, symbol)
-            
-            if filtered_features.empty or filtered_target.empty:
-                print(f"⚠️ Insufficient tradable regime data for {symbol}")
-                self._record_training_failure(symbol, "insufficient_tradable_data")
-                return False
-            
-            X_train, X_test, y_train, y_test = self.time_series_train_test_split(filtered_features, filtered_target)
+            X_train, X_test, y_train, y_test = self.time_series_train_test_split(features, target)
             
             if X_train is None:
                 print(f"⚠️ Insufficient data after split for {symbol}")
                 self._record_training_failure(symbol, "split_failed")
                 return False
 
-            # Enhanced scaling
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            # --- FIX 1: Perform Feature Selection *AFTER* split, *ONLY* on (X_train, y_train) ---
+            X_train_selected, selected_features = self._select_features(X_train, y_train, symbol)
+            # Apply the *same* selected features to the test set
+            X_test_selected = X_test[selected_features]
+            # --- END FIX 1 ---
+
+            self.feature_importance[symbol]['selected_features'] = selected_features
             
-            # Apply symbol-specific model complexity
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train_selected)
+            X_test_scaled = scaler.transform(X_test_selected)
+            
             rf_params, gb_params = self._get_symbol_specific_parameters(symbol, X_train_scaled, y_train)
             
-            # Train models with optimized parameters
             rf = RandomForestClassifier(**rf_params)
             gb = GradientBoostingClassifier(**gb_params)
 
@@ -1748,19 +1777,27 @@ class MLPredictor:
         try:
             if len(close) < 20:
                 return 0.5
-                
-            returns = close.pct_change().dropna()
-            if len(returns) < 10:
-                return 0.5
-                
-            abs_returns = returns.abs()
-            net_movement = returns.sum()
-            total_movement = abs_returns.sum()
             
-            if total_movement == 0:
+            # Use a fixed rolling window (e.g., 20 periods) to prevent lookback leak
+            window = 20
+            returns = close.pct_change()
+            
+            # Calculate rolling sums
+            net_movement = returns.rolling(window).sum()
+            total_movement = returns.abs().rolling(window).sum()
+
+            if net_movement.empty or total_movement.empty:
                 return 0.5
-                
-            return abs(net_movement / total_movement)
+
+            # Get the last value
+            last_net_movement = net_movement.iloc[-1]
+            last_total_movement = total_movement.iloc[-1]
+
+            if last_total_movement == 0:
+                return 0.5
+            
+            efficiency = abs(last_net_movement / last_total_movement)
+            return efficiency if not pd.isna(efficiency) else 0.5
         except:
             return 0.5
 
@@ -2685,6 +2722,39 @@ class MLPredictor:
 
         self.logger.info(f"ML performance issue analysis complete for {len(analysis)} symbols.")
         return analysis
+
+    def detect_data_leakage(self, symbol: str, df: pd.DataFrame) -> Dict:
+        leakage_report = {
+            'symbol': symbol,
+            'issues': [],
+            'suggestions': []
+        }
+        
+        test_indices = [100, 200, 300]
+        feature_sets = []
+        
+        for idx in test_indices:
+            if idx < len(df):
+                features = self.prepare_features_point_in_time(df, idx, symbol=symbol)
+                if not features.empty:
+                    feature_sets.append(features.iloc[0].to_dict())
+        
+        if len(feature_sets) > 1:
+            first_features = feature_sets[0]
+            for i in range(1, len(feature_sets)):
+                similarity = sum(1 for k in first_features if k in feature_sets[i] and first_features[k] == feature_sets[i][k]) / len(first_features)
+                if similarity > 0.9:
+                    leakage_report['issues'].append(f"High feature similarity ({similarity:.2f}) across different time periods")
+                    leakage_report['suggestions'].append("Check for static features or improper windowing")
+        
+        features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
+        if not target.empty:
+            target_counts = target.value_counts()
+            if 0 in target_counts and target_counts[0] / len(target) > 0.8:
+                leakage_report['issues'].append("High proportion of 'Hold' targets (>80%)")
+                leakage_report['suggestions'].append("Review target creation thresholds and volatility calculations")
+        
+        return leakage_report
 
     # Add this helper method to the MLPredictor class
     def _calculate_hold_prediction_ratio(self, symbol: str) -> float:
