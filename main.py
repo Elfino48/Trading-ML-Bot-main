@@ -360,53 +360,39 @@ class AdvancedTradingBot:
         print("✅ Configuration validation passed")
 
     def _initialize_ml_models(self):
-        print("\n🤖 Initializing ML models...")
-        try:
-            self.strategy_orchestrator.ml_predictor.load_models()
-            models_loaded_count = len(self.strategy_orchestrator.ml_predictor.models)
-            if models_loaded_count > 0:
-                print(f"✅ Loaded {models_loaded_count} pre-trained models from disk")
-            else:
-                print("ℹ️ No pre-trained models found on disk.")
-            
-            loaded_symbols = set(self.strategy_orchestrator.ml_predictor.models.keys())
-            required_symbols = set(SYMBOLS)
-            missing_symbols = list(required_symbols - loaded_symbols)
-            
-            if not missing_symbols and models_loaded_count > 0:
-                print(f"✅ All {len(required_symbols)} required models are loaded.")
+            print("\n🤖 Initializing ML models...")
+            try:
+                self.strategy_orchestrator.ml_predictor.load_models()
+                models_loaded_count = len(self.strategy_orchestrator.ml_predictor.models)
+                if models_loaded_count > 0:
+                    print(f"✅ Loaded {models_loaded_count} pre-trained models from disk (will be retrained)")
+                else:
+                    print("ℹ️ No pre-trained models found on disk. Starting fresh training.")
+
+                print("🔥 Forcing retraining of ALL models on startup...")
                 if self.telegram_bot:
                     self.telegram_bot.log_important_event(
-                        "MODELS LOADED",
-                        f"Successfully loaded all {len(required_symbols)} pre-trained ML models"
-                    )
-            elif not missing_symbols and models_loaded_count == 0:
-                print("⚠️ No symbols configured, no models to load or train.")
-            else:
-                print(f"📚 Found {len(missing_symbols)} missing models. Training new models for: {missing_symbols}")
-                if self.telegram_bot:
-                    self.telegram_bot.log_important_event(
-                        "INITIAL MODELS TRAINING",
-                        f"Starting training for {len(missing_symbols)} new symbols: {', '.join(missing_symbols)}"
+                        "FORCED INITIAL TRAINING",
+                        f"Forcing retraining of all {len(SYMBOLS)} models: {', '.join(SYMBOLS)}"
                     )
                 
-                trained_count = self._retrain_all_models(symbols_to_train=missing_symbols)
+                trained_count = self._retrain_all_models(force_all=True)
                 
                 if trained_count > 0:
                     self.strategy_orchestrator.ml_predictor.save_models()
-                    print(f"💾 Saved {trained_count} new models to disk")
+                    print(f"💾 Saved {trained_count} newly trained models to disk")
                     if self.telegram_bot:
                         self.telegram_bot.log_important_event(
                             "NEW MODELS TRAINED",
                             f"Successfully trained and saved {trained_count} new ML models"
                         )
                 else:
-                    error_msg = f"Initial model training failed for {missing_symbols}"
+                    error_msg = "Initial forced model training failed for all symbols"
                     self.error_handler.handle_ml_error(Exception(error_msg), "ALL", "initial_training")
 
-        except Exception as e:
-            self.error_handler.handle_ml_error(e, "ALL", "initialization")
-            print("⚠️ Continuing without ML models or using potentially incomplete set")
+            except Exception as e:
+                self.error_handler.handle_ml_error(e, "ALL", "initialization")
+                print("⚠️ Continuing without ML models or using potentially incomplete set")
 
     def _retrain_all_models(self, force_all: bool = False, symbols_to_train: List[str] = None) -> int:
         

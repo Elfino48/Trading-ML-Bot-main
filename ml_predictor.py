@@ -2,11 +2,12 @@ import json
 import time
 import pandas as pd
 import numpy as np
+from imblearn.over_sampling import SMOTE
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.feature_selection import SelectKBest, f_classif, RFE
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+from sklearn.feature_selection import SelectKBest, f_classif, RFE, mutual_info_classif
 from sklearn.covariance import EllipticEnvelope
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LassoCV
@@ -35,7 +36,7 @@ class MLPredictor:
         self.error_handler = error_handler
         self.database = database
         self.model_performance = {}
-        self.performance_threshold = 0.55
+        self.performance_threshold = 0.60
         self.feature_importance = {}
         self.walk_forward_performance = {}
         self.model_versions = {}
@@ -44,7 +45,28 @@ class MLPredictor:
         self.feature_drift_detector = {}
         self.real_time_monitor = {}
         self.logger = logging.getLogger('MLPredictor')
+        self.detailed_logger = logging.getLogger('MLDetailed') # For enhanced logging
 
+        # Configuration for Deepseek's enhanced pipeline
+        self.enhanced_config = {
+            'min_training_samples': 400,
+            'test_size': 0.25,
+            'validation_gap': 15,
+            'max_overfit_threshold': 0.15,
+            'feature_selection_method': 'advanced',
+            'target_lookahead': [5, 10, 15],  # Multiple timeframes
+            'volatility_adjustment': True,
+            'enable_smote': True,
+            'symbol_specific_params': {
+                'BTCUSDT': {'n_estimators': 200, 'max_depth': 10},
+                'ETHUSDT': {'n_estimators': 180, 'max_depth': 9},
+                'BNBUSDT': {'n_estimators': 150, 'max_depth': 8},
+                'XRPUSDT': {'n_estimators': 120, 'max_depth': 7},
+                'SOLUSDT': {'n_estimators': 120, 'max_depth': 7},
+                'DOGEUSDT': {'n_estimators': 100, 'max_depth': 6}
+            }
+        }
+        
         self.auto_save_interval = 10
         self.training_count = 0
         
@@ -62,9 +84,9 @@ class MLPredictor:
         self.pca_components = 15
         
         # NEW: Enhanced validation and multi-timeframe targets
-        self.walk_forward_splits = 5
+        self.walk_forward_splits = 3
         self.validation_window = 200
-        self.min_training_samples = 150
+        self.min_training_samples = 200
 
         # BTC correlation configuration
         self.btc_correlation_enabled = True
@@ -75,9 +97,8 @@ class MLPredictor:
         
         # NEW: Multi-timeframe target configuration - DEFINE BEFORE PRINT
         self.target_configs = [
-            {'periods': 5, 'weight': 0.4, 'threshold_multiplier': 1.5},   # Short-term
-            {'periods': 10, 'weight': 0.3, 'threshold_multiplier': 2.0},  # Medium-term
-            {'periods': 20, 'weight': 0.3, 'threshold_multiplier': 2.5}   # Long-term
+            {'periods': 8, 'weight': 0.6, 'threshold_multiplier': 1.8},   # Primary timeframe
+            {'periods': 15, 'weight': 0.4, 'threshold_multiplier': 2.2},  # Secondary timeframe
         ]
         
         # NEW: Symbol-specific configurations for accuracy improvement
@@ -91,12 +112,12 @@ class MLPredictor:
         }
 
         self.symbol_model_complexity = {
-            'BTCUSDT': {'max_features': 30, 'enable_hpo': True, 'model_depth': 'deep'},
-            'ETHUSDT': {'max_features': 25, 'enable_hpo': True, 'model_depth': 'medium'},
-            'BNBUSDT': {'max_features': 20, 'enable_hpo': False, 'model_depth': 'medium'},
-            'XRPUSDT': {'max_features': 15, 'enable_hpo': False, 'model_depth': 'simple'},
-            'SOLUSDT': {'max_features': 15, 'enable_hpo': False, 'model_depth': 'simple'},
-            'DOGEUSDT': {'max_features': 12, 'enable_hpo': False, 'model_depth': 'simple'}
+            'BTCUSDT': {'max_features': 12, 'enable_hpo': True, 'model_depth': 'medium'},
+            'ETHUSDT': {'max_features': 12, 'enable_hpo': True, 'model_depth': 'medium'},
+            'BNBUSDT': {'max_features': 10, 'enable_hpo': False, 'model_depth': 'simple'},
+            'XRPUSDT': {'max_features': 8, 'enable_hpo': False, 'model_depth': 'simple'},
+            'SOLUSDT': {'max_features': 8, 'enable_hpo': False, 'model_depth': 'simple'},
+            'DOGEUSDT': {'max_features': 8, 'enable_hpo': False, 'model_depth': 'simple'}
         }
         
         # Enhanced model parameters with hyperparameter optimization
@@ -119,26 +140,31 @@ class MLPredictor:
         }
         
         # Default parameters (used when hyperparameter optimization is skipped)
-        self.rf_params = {
-            'n_estimators': 100,
-            'max_depth': 8,
-            'min_samples_split': 15,
-            'min_samples_leaf': 8,
-            'max_features': 'sqrt',
+        # --- UPDATED with Deepseek's regularization parameters to reduce overfitting ---
+        rf_params = {
+            'n_estimators': 50,  # Reduced from 100
+            'max_depth': 4,      # Reduced from 8
+            'min_samples_split': 20,  # Increased from 10
+            'min_samples_leaf': 10,   # Increased from 5
+            'max_features': 0.3,      # More restrictive
+            'bootstrap': True,
+            'max_samples': 0.7,       # Use subset of data
+            'class_weight': 'balanced',
             'random_state': 42,
             'n_jobs': -1
         }
-        
+
         self.gb_params = {
-            'n_estimators': 80,
-            'max_depth': 5,
-            'learning_rate': 0.1,
-            'min_samples_split': 15,
-            'min_samples_leaf': 8,
+            'n_estimators': 100,
+            'max_depth': 6,
+            'learning_rate': 0.05,  # Lower learning rate
+            'min_samples_split': 20,
+            'min_samples_leaf': 10,
             'subsample': 0.8,
+            'max_features': 'sqrt',
             'random_state': 42
         }
-        
+
         # NEW: Hyperparameter optimization settings
         self.enable_hyperparameter_optimization = True
         self.hpo_n_iter = 20
@@ -151,11 +177,896 @@ class MLPredictor:
         print(f"   • Max features: {self.max_features}")
         print(f"   • Symbol-specific configurations: {len(self.symbol_volatility_profiles)} symbols")
 
+        self.enable_conservative_mode()
+
     def set_error_handler(self, error_handler):
         self.error_handler = error_handler
 
     def set_database(self, database):
         self.database = database
+
+    # =========================================================================
+    # 2. DEEPSEEK ENHANCED PIPELINE (NEW METHODS)
+    # =========================================================================
+
+    # --- 2.1: New Main Training Function ---
+
+    def train_model_enhanced(self, symbol: str, df: pd.DataFrame) -> bool:
+        try:
+            print(f"🚀 ENHANCED TRAINING FOR {symbol}")
+            
+            features, target = self.prepare_training_data_enhanced_v2(df, symbol=symbol)
+            
+            min_samples = self.enhanced_config.get('min_training_samples', 300)
+            if features.empty or len(features) < min_samples:
+                print(f"⚠️ Insufficient quality data for {symbol}: {len(features)} samples")
+                return False
+            
+            self.log_feature_analysis(symbol, features, target)
+            
+            target_counts = target.value_counts()
+            print(f"Target distribution: {target_counts.to_dict()}")
+            
+            # Remove SMOTE entirely and use proper class weights
+            if min(target_counts.values) < len(target) * 0.3:
+                print(f"⚠️ Class imbalance detected. Using class weights instead of SMOTE.")
+                # Class weights will be handled in model parameters
+            
+            X_train, X_test, y_train, y_test = self.time_series_split_enhanced(
+                features, 
+                target, 
+                test_size=self.enhanced_config.get('test_size', 0.25), 
+                gap=self.enhanced_config.get('validation_gap', 15)
+            )
+            
+            if X_train is None:
+                print(f"⚠️ Data split failed for {symbol}")
+                return False
+            
+            scaler = StandardScaler()
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+            
+            self.scalers[symbol] = scaler
+            
+            selected_features = self._advanced_feature_selection(
+                X_train_scaled, y_train, X_test_scaled, y_test, symbol, n_features=15
+            )
+            X_train_selected = X_train_scaled[selected_features]
+            X_test_selected = X_test_scaled[selected_features]
+            
+            print(f"🔍 Selected {len(selected_features)} robust features")
+            
+            return self._train_regularized_models(symbol, X_train_selected, X_test_selected, y_train, y_test, selected_features)
+            
+        except Exception as e:
+            print(f"❌ Enhanced training failed for {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    # --- 2.2: New Data Preparation ---
+
+    def train_model_safe(self, symbol: str, df: pd.DataFrame) -> bool:
+        """Safe training wrapper that ensures proper method selection"""
+        print(f"🔧 SAFE TRAINING FOR {symbol}")
+        
+        # First try robust training with simpler models
+        if self.train_robust_model_fixed(symbol, df):
+            return True
+        
+        # Fallback to ultra-conservative training
+        print(f"⚠️ Robust training failed, trying ultra-conservative for {symbol}")
+        return self.train_ultra_conservative(symbol, df)
+
+    def train_robust_model_fixed(self, symbol: str, df: pd.DataFrame) -> bool:
+        """Fixed version of robust training"""
+        try:
+            print(f"🎯 FIXED ROBUST TRAINING FOR {symbol}")
+            
+            # 1. Prepare data with strict validation
+            features, target = self.prepare_training_data_enhanced_v2(df, symbol=symbol)
+            
+            if features.empty or len(features) < 500:  # Increased minimum
+                print(f"⚠️ Insufficient data for {symbol}: {len(features)} samples")
+                return False
+            
+            # 2. More conservative split with larger gap
+            split_idx = int(len(features) * 0.6)  # 60% train, 40% test
+            X_train = features.iloc[:split_idx]
+            X_test = features.iloc[split_idx:]
+            y_train = target.iloc[:split_idx]
+            y_test = target.iloc[split_idx:]
+            
+            if len(X_train) < 200 or len(X_test) < 100:
+                print(f"⚠️ Insufficient data after split for {symbol}")
+                return False
+            
+            # 3. Scale features
+            scaler = StandardScaler()
+            X_train_scaled = pd.DataFrame(
+                scaler.fit_transform(X_train), 
+                columns=X_train.columns, 
+                index=X_train.index
+            )
+            X_test_scaled = pd.DataFrame(
+                scaler.transform(X_test), 
+                columns=X_test.columns, 
+                index=X_test.index
+            )
+            
+            # 4. Very conservative feature selection
+            from sklearn.feature_selection import SelectKBest, f_classif
+            selector = SelectKBest(score_func=f_classif, k=min(8, X_train_scaled.shape[1]))  # Max 8 features
+            X_train_selected = selector.fit_transform(X_train_scaled, y_train)
+            X_test_selected = selector.transform(X_test_scaled)
+            selected_features = X_train_scaled.columns[selector.get_support()].tolist()
+            
+            print(f"🔍 Selected {len(selected_features)} features for {symbol}")
+            
+            # 5. Train with VERY conservative parameters
+            rf_params = {
+                'n_estimators': 50,
+                'max_depth': 4,
+                'min_samples_split': 25,
+                'min_samples_leaf': 15,
+                'max_features': 0.3,
+                'bootstrap': True,
+                'max_samples': 0.6,
+                'class_weight': 'balanced',
+                'random_state': 42,
+                'n_jobs': -1
+            }
+            
+            rf = RandomForestClassifier(**rf_params)
+            rf.fit(X_train_selected, y_train)
+            
+            # 6. Validate with realistic thresholds
+            train_pred_rf = rf.predict(X_train_selected)
+            test_pred_rf = rf.predict(X_test_selected)
+            
+            train_acc_rf = accuracy_score(y_train, train_pred_rf)
+            test_acc_rf = accuracy_score(y_test, test_pred_rf)
+            overfit_rf = train_acc_rf - test_acc_rf
+            
+            print(f"📊 {symbol} RF - Train: {train_acc_rf:.3f}, Test: {test_acc_rf:.3f}, Overfit: {overfit_rf:.3f}")
+            
+            # MUCH stricter acceptance criteria
+            if test_acc_rf > 0.52 and overfit_rf < 0.15:  # Reduced overfit threshold
+                self.models[symbol] = {'rf': rf}
+                self.scalers[symbol] = scaler
+                self.feature_importance[symbol] = {
+                    'selected_features': selected_features,
+                    'test_accuracy': test_acc_rf
+                }
+                print(f"✅ ACCEPTED model for {symbol} with test accuracy: {test_acc_rf:.3f}")
+                return True
+            else:
+                print(f"❌ REJECTED model for {symbol}: test_acc={test_acc_rf:.3f}, overfit={overfit_rf:.3f}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Fixed robust training failed for {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def prepare_training_data_enhanced_v2(self, df: pd.DataFrame, symbol: str = None) -> tuple:
+        
+        min_samples = 600
+            
+        if len(df) < 1500:  # Need at least 1500 bars
+            return pd.DataFrame(), pd.Series()
+        max_bars = min(4000, len(df) - 100)  # Use more data if available
+        
+        df = df.tail(max_bars).copy()
+        
+        features_list = []
+        targets = []
+        
+        stride = max(1, len(df) // 500)
+        max_target_period = 20
+
+        for i in range(50, len(df) - max_target_period, stride):
+            
+            window_data = df.iloc[:i+1]
+            if len(window_data) < 50:
+                continue
+
+            close_prices = window_data['close'].astype(float)
+            high_prices = window_data['high'].astype(float)
+            low_prices = window_data['low'].astype(float)
+            volume = window_data['volume'].astype(float)
+            
+            features_dict = self._calculate_high_signal_features(close_prices, high_prices, low_prices, volume, symbol)
+            features = pd.DataFrame([features_dict]).fillna(0)
+
+            target = self.create_regime_aware_target(df, i, symbol)
+            
+            if not features.empty:
+                features_list.append(features.iloc[0])
+                targets.append(target)
+        
+        if len(features_list) < min_samples:
+            return pd.DataFrame(), pd.Series()
+        
+        features_df = pd.DataFrame(features_list).fillna(0)
+        target_series = pd.Series(targets, index=features_df.index)
+        
+        features_df = self._clean_features(features_df)
+        
+        return features_df, target_series
+
+    # --- 2.3: New Feature Engineering ---
+
+    def _calculate_enhanced_features(self, close, high, low, volume, symbol):
+        """Enhanced feature set with better market microstructure (Deepseek)"""
+        features = {}
+        
+        try:
+            if len(close) < 50:
+                return {}
+
+            # 1. Price-based features
+            returns = close.pct_change()
+            
+            # Volatility features
+            features['volatility_5'] = returns.rolling(5).std().iloc[-1]
+            features['volatility_20'] = returns.rolling(20).std().iloc[-1]
+            features['volatility_ratio'] = features['volatility_5'] / max(features['volatility_20'], 0.001)
+            
+            # Momentum features
+            features['momentum_5'] = (close.iloc[-1] / close.iloc[-5] - 1) if len(close) >= 6 else 0
+            features['momentum_10'] = (close.iloc[-1] / close.iloc[-10] - 1) if len(close) >= 11 else 0
+            features['momentum_ratio'] = features['momentum_5'] / max(abs(features['momentum_10']), 0.001)
+            
+            # 2. Advanced TA features
+            # RSI variations
+            rsi_14 = talib.RSI(close, timeperiod=14)[-1]
+            rsi_7 = talib.RSI(close, timeperiod=7)[-1]
+            features['rsi_14'] = rsi_14 if not pd.isna(rsi_14) else 50
+            features['rsi_7'] = rsi_7 if not pd.isna(rsi_7) else 50
+            features['rsi_momentum'] = features['rsi_7'] - features['rsi_14']
+            
+            # MACD features
+            macd, macd_signal, macd_hist = talib.MACD(close)
+            features['macd'] = macd[-1] if not pd.isna(macd[-1]) else 0
+            features['macd_signal'] = macd_signal[-1] if not pd.isna(macd_signal[-1]) else 0
+            features['macd_hist'] = macd_hist[-1] if not pd.isna(macd_hist[-1]) else 0
+            
+            # 3. Volume-price relationship
+            features['volume_price_corr'] = self._calculate_volume_price_correlation(close, volume, 20)
+            features['volume_velocity'] = volume.pct_change(5).iloc[-1] if len(volume) >= 6 else 0
+            
+            # 4. Market regime features
+            features['trend_strength'] = self._calculate_trend_strength(close, 20) # Re-uses your existing helper
+            features['market_regime'] = self._classify_market_regime(close, volume)
+            
+            # 5. Support/resistance levels (NEW HELPERS)
+            features['support_distance'] = self._calculate_support_distance(close, low, 20)
+            features['resistance_distance'] = self._calculate_resistance_distance(close, high, 20)
+            
+            # 6. Symbol-specific features (NEW HELPERS)
+            if symbol in ['BTCUSDT', 'ETHUSDT']:
+                features.update(self._calculate_institutional_features(close, volume))
+            elif symbol in ['SOLUSDT', 'DOGEUSDT']:
+                features.update(self._calculate_retail_momentum_features(close, volume, high, low))
+                
+        except Exception as e:
+            self.logger.error(f"Error calculating enhanced features for {symbol}: {e}")
+        
+        return features
+
+    def _calculate_volume_price_correlation(self, close, volume, window):
+        """Calculate correlation between price changes and volume (Deepseek)"""
+        try:
+            price_changes = close.pct_change().dropna()
+            volume_changes = volume.pct_change().dropna()
+            
+            if len(price_changes) < window or len(volume_changes) < window:
+                return 0
+                
+            # Align the series
+            common_index = price_changes.index.intersection(volume_changes.index)
+            if len(common_index) < window:
+                return 0.0
+
+            price_aligned = price_changes.loc[common_index].tail(window)
+            volume_aligned = volume_changes.loc[common_index].tail(window)
+            
+            if len(price_aligned) < 10:
+                return 0
+
+            correlation = price_aligned.corr(volume_aligned)
+            return correlation if not pd.isna(correlation) else 0
+        except:
+            return 0
+
+    def _classify_market_regime(self, close, volume):
+        """Classify current market regime (Deepseek)"""
+        try:
+            returns = close.pct_change().dropna()
+            volatility = returns.rolling(20).std().iloc[-1] if len(returns) >= 20 else 0
+            trend = self._calculate_trend_strength(close, 20) # Re-uses your existing helper
+            volume_trend = volume.rolling(20).mean().iloc[-1] / volume.rolling(50).mean().iloc[-1] if len(volume) >= 50 else 1
+            
+            if pd.isna(volatility) or pd.isna(trend) or pd.isna(volume_trend):
+                return 0.5 # Neutral on bad data
+
+            if volatility > 0.03 and abs(trend) < 0.2:
+                return 2  # High volatility, low trend (choppy)
+            elif volatility < 0.01 and abs(trend) < 0.1:
+                return 0  # Low volatility, low trend (consolidation)
+            elif trend > 0.3:
+                return 1  # Strong uptrend
+            elif trend < -0.3:
+                return -1  # Strong downtrend
+            else:
+                return 0.5  # Neutral
+        except:
+            return 0
+
+    # --- 2.4: *MISSING* Feature Helpers (I've implemented these) ---
+
+    def _calculate_support_distance(self, close: pd.Series, low: pd.Series, window: int) -> float:
+        """Calculate distance from current close to recent support"""
+        try:
+            if len(low) < window:
+                return 0
+            support = low.rolling(window).min().iloc[-1]
+            if support <= 0:
+                return 0
+            distance = (close.iloc[-1] / support) - 1
+            return max(0, distance) # Distance can only be positive
+        except:
+            return 0
+
+    def _calculate_resistance_distance(self, close: pd.Series, high: pd.Series, window: int) -> float:
+        """Calculate distance from current close to recent resistance"""
+        try:
+            if len(high) < window:
+                return 0
+            resistance = high.rolling(window).max().iloc[-1]
+            if resistance <= 0:
+                return 0
+            distance = (close.iloc[-1] / resistance) - 1
+            return min(0, distance) # Distance can only be negative
+        except:
+            return 0
+
+    def _calculate_institutional_features(self, close: pd.Series, volume: pd.Series) -> Dict:
+        """Features for large caps (BTC/ETH) - steady volume"""
+        features = {}
+        try:
+            if len(volume) < 20:
+                return {}
+            vol_mean = volume.rolling(20).mean().iloc[-1]
+            vol_std = volume.rolling(20).std().iloc[-1]
+            
+            # Coefficient of variation (lower is more consistent)
+            features['volume_consistency'] = vol_std / vol_mean if vol_mean > 0 else 1.0
+            
+            # Percentage of recent days with high volume
+            high_vol_threshold = volume.quantile(0.75)
+            features['high_volume_concentration'] = (volume.tail(20) > high_vol_threshold).mean()
+            return features
+        except:
+            return {}
+
+    def _calculate_retail_momentum_features(self, close: pd.Series, volume: pd.Series, high: pd.Series, low: pd.Series) -> Dict:
+        """Features for volatile caps (SOL/DOGE) - spiky volume, high range"""
+        features = {}
+        try:
+            if len(volume) < 20 or len(close) < 20:
+                return {}
+            vol_mean = volume.rolling(20).mean().iloc[-1]
+            
+            # Current volume vs. recent average
+            features['volume_spike'] = volume.iloc[-1] / vol_mean if vol_mean > 0 else 1.0
+            
+            # Recent price range as % of close
+            day_range = (high.tail(20) - low.tail(20)) / close.tail(20)
+            features['avg_day_range_perc'] = day_range.mean()
+            return features
+        except:
+            return {}
+
+    # --- 2.5: New Target Definition ---
+
+    def create_enhanced_target_v2(self, df: pd.DataFrame, current_idx: int, symbol: str = None) -> int:
+        """More sophisticated target definition with regime awareness (Deepseek)"""
+        
+        if current_idx + 20 >= len(df):
+            return 0
+            
+        current_data = df.iloc[:current_idx+1]
+        future_data = df.iloc[current_idx:current_idx+21]  # Look 20 periods ahead
+        
+        if len(future_data) < 2 or len(current_data) < 20:
+            return 0
+            
+        current_price = current_data['close'].iloc[-1]
+        future_prices = future_data['close']
+        
+        # Calculate multiple metrics
+        max_price = future_prices.max()
+        min_price = future_prices.min()
+        final_price = future_prices.iloc[-1]
+        
+        # Dynamic thresholds based on recent volatility
+        recent_volatility = current_data['close'].pct_change().rolling(20).std().iloc[-1]
+        if pd.isna(recent_volatility) or recent_volatility == 0:
+            recent_volatility = 0.02
+            
+        # Symbol-specific thresholds
+        if symbol in ['BTCUSDT', 'ETHUSDT']:
+            threshold = recent_volatility * 1.5
+            strong_threshold = recent_volatility * 2.5
+        elif symbol in ['SOLUSDT', 'DOGEUSDT']:
+            threshold = recent_volatility * 1.2
+            strong_threshold = recent_volatility * 2.0
+        else:
+            threshold = recent_volatility * 1.3
+            strong_threshold = recent_volatility * 2.2
+        
+        # Calculate various return metrics
+        max_return = (max_price - current_price) / current_price
+        min_return = (min_price - current_price) / current_price
+        final_return = (final_price - current_price) / current_price
+        
+        # Weighted decision based on multiple factors
+        score = 0
+        
+        # Primary: Final return
+        if final_return > strong_threshold:
+            score += 2
+        elif final_return > threshold:
+            score += 1
+        elif final_return < -strong_threshold:
+            score -= 2
+        elif final_return < -threshold:
+            score -= 1
+            
+        # Secondary: Maximum potential
+        if max_return > threshold * 1.5:
+            score += 1
+        if min_return < -threshold * 1.5:
+            score -= 1
+            
+        # Convert to signal
+        if score >= 2:
+            return 1
+        elif score <= -2:
+            return -1
+        else:
+            return 0
+
+    # --- 2.6: New Training Helpers ---
+
+    def _apply_smote_balancing(self, features: pd.DataFrame, target: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+        """Balance classes using SMOTE, with a fallback to undersampling."""
+        try:
+            smote = SMOTE(random_state=42, k_neighbors=max(1, min(target.value_counts()) - 1))
+            X_res, y_res = smote.fit_resample(features, target)
+            return X_res, y_res
+        except ImportError:
+            self.logger.warning("imblearn not found. Falling back to simple random undersampling.")
+            return self._balance_classes(features, target) # Re-uses your existing helper
+        except Exception as e:
+            self.logger.warning(f"SMOTE failed: {e}. Falling back to simple random undersampling.")
+            return self._balance_classes(features, target)
+
+    def time_series_split_enhanced(self, features: pd.DataFrame, target: pd.Series, test_size: float = 0.25, gap: int = 15):
+        """Rigorous time-based split (from Deepseek)"""
+        if len(features) < 100:
+            return None, None, None, None
+            
+        split_idx = int(len(features) * (1 - test_size))
+        train_end_idx = split_idx - gap
+        
+        if train_end_idx < 50:
+            train_end_idx = split_idx # Not enough data for a gap
+            
+        X_train = features.iloc[:train_end_idx]
+        X_test = features.iloc[split_idx:]
+        y_train = target.iloc[:train_end_idx]
+        y_test = target.iloc[split_idx:]
+        
+        if len(X_train) < 50 or len(X_test) < 10:
+            return None, None, None, None
+            
+        return X_train, X_test, y_train, y_test
+
+    def _advanced_feature_selection(self, X_train: pd.DataFrame, y_train: pd.Series, 
+                                X_test: pd.DataFrame, y_test: pd.Series, 
+                                symbol: str, n_features: int = 15) -> List[str]:
+        """Feature selection using only training data"""
+        from sklearn.feature_selection import SelectKBest, f_classif
+        
+        # Method 1: ANOVA F-value
+        selector = SelectKBest(score_func=f_classif, k=min(n_features, X_train.shape[1]))
+        selector.fit(X_train, y_train)
+        anova_features = X_train.columns[selector.get_support()].tolist()
+        
+        # Method 2: Random Forest importance (training only)
+        rf_selector = RandomForestClassifier(
+            n_estimators=50, 
+            max_depth=5, 
+            random_state=42
+        )
+        rf_selector.fit(X_train, y_train)
+        
+        # Get top features from RF
+        importances = rf_selector.feature_importances_
+        feature_importance_df = pd.DataFrame({
+            'feature': X_train.columns,
+            'importance': importances
+        }).sort_values('importance', ascending=False)
+        
+        rf_features = feature_importance_df.head(n_features)['feature'].tolist()
+        
+        # Combine methods
+        combined_features = list(set(anova_features + rf_features))
+        
+        print(f"🔍 Feature selection for {symbol}: {len(combined_features)} features from {len(X_train.columns)}")
+        
+        return combined_features[:n_features]
+
+    def _train_regularized_models(self, symbol, X_train, X_test, y_train, y_test, features):
+        """Training with balanced regularization and realistic thresholds"""
+        
+        # Get symbol-specific configuration
+        enhanced_params = self.enhanced_config.get('symbol_specific_params', {}).get(symbol, {})
+        
+        # Symbol-specific overfit thresholds
+        if symbol in ['BTCUSDT', 'ETHUSDT']:
+            max_overfit_threshold = 0.20  # More lenient for stable coins
+            min_test_accuracy = 0.48
+        elif symbol in ['SOLUSDT', 'DOGEUSDT']:
+            max_overfit_threshold = 0.25  # Even more lenient for volatile coins  
+            min_test_accuracy = 0.45
+        else:
+            max_overfit_threshold = 0.22  # Default
+            min_test_accuracy = 0.47
+        
+        # Use enhanced parameters if available, otherwise use balanced defaults
+        if enhanced_params:
+            rf_params_enhanced = {
+                'n_estimators': enhanced_params.get('n_estimators', 100),
+                'max_depth': enhanced_params.get('max_depth', 6),
+                'min_samples_split': 10,  # Reduced from 30
+                'min_samples_leaf': 5,    # Reduced from 40
+                'max_features': 'sqrt',
+                'bootstrap': True,
+                'class_weight': 'balanced',
+                'random_state': 42,
+                'n_jobs': -1
+            }
+        else:
+            rf_params_enhanced = {
+                'n_estimators': 100,
+                'max_depth': 6,
+                'min_samples_split': 10,
+                'min_samples_leaf': 5,
+                'max_features': 'sqrt',
+                'bootstrap': True,
+                'class_weight': 'balanced',
+                'random_state': 42,
+                'n_jobs': -1
+            }
+
+        # Gradient Boosting parameters
+        gb_params_enhanced = {
+            'n_estimators': 80,
+            'max_depth': 5,
+            'learning_rate': 0.1,
+            'min_samples_split': 10,
+            'min_samples_leaf': 5,
+            'subsample': 0.8,
+            'max_features': 'sqrt',
+            'random_state': 42
+        }
+        
+        # Initialize and train models
+        rf = RandomForestClassifier(**rf_params_enhanced)
+        gb = GradientBoostingClassifier(**gb_params_enhanced)
+        
+        rf.fit(X_train, y_train)
+        gb.fit(X_train, y_train)
+        
+        # Calculate performance metrics
+        train_pred_rf = rf.predict(X_train)
+        test_pred_rf = rf.predict(X_test)
+        
+        train_accuracy_rf = accuracy_score(y_train, train_pred_rf)
+        test_accuracy_rf = accuracy_score(y_test, test_pred_rf)
+        overfit_rf = train_accuracy_rf - test_accuracy_rf
+        
+        # Additional metrics for RF
+        rf_precision = precision_score(y_test, test_pred_rf, average='weighted', zero_division=0)
+        rf_recall = recall_score(y_test, test_pred_rf, average='weighted', zero_division=0)
+        rf_f1 = f1_score(y_test, test_pred_rf, average='weighted', zero_division=0)
+        
+        print(f"📊 {symbol} RF - Train: {train_accuracy_rf:.3f}, Test: {test_accuracy_rf:.3f}, Overfit: {overfit_rf:.3f}")
+        print(f"    Precision: {rf_precision:.3f}, Recall: {rf_recall:.3f}, F1: {rf_f1:.3f}")
+
+        # GB metrics
+        train_pred_gb = gb.predict(X_train)
+        test_pred_gb = gb.predict(X_test)
+        train_accuracy_gb = accuracy_score(y_train, train_pred_gb)
+        test_accuracy_gb = accuracy_score(y_test, test_pred_gb)
+        overfit_gb = train_accuracy_gb - test_accuracy_gb
+        
+        gb_precision = precision_score(y_test, test_pred_gb, average='weighted', zero_division=0)
+        gb_recall = recall_score(y_test, test_pred_gb, average='weighted', zero_division=0)
+        gb_f1 = f1_score(y_test, test_pred_gb, average='weighted', zero_division=0)
+        
+        print(f"📊 {symbol} GB - Train: {train_accuracy_gb:.3f}, Test: {test_accuracy_gb:.3f}, Overfit: {overfit_gb:.3f}")
+        print(f"    Precision: {gb_precision:.3f}, Recall: {gb_recall:.3f}, F1: {gb_f1:.3f}")
+        
+        # Check class distribution in predictions
+        unique_rf, counts_rf = np.unique(test_pred_rf, return_counts=True)
+        unique_gb, counts_gb = np.unique(test_pred_gb, return_counts=True)
+        
+        print(f"📈 {symbol} Test Prediction Distribution:")
+        print(f"    RF: {dict(zip(unique_rf, counts_rf))}")
+        print(f"    GB: {dict(zip(unique_gb, counts_gb))}")
+        
+        # Enhanced model acceptance criteria
+        rf_acceptable = (overfit_rf < max_overfit_threshold and 
+                        test_accuracy_rf >= min_test_accuracy)
+        gb_acceptable = (overfit_gb < max_overfit_threshold and 
+                        test_accuracy_gb >= min_test_accuracy)
+        
+        # At least one model should be acceptable
+        model_acceptable = rf_acceptable or gb_acceptable
+        
+        if model_acceptable:
+            # Save previous models if they exist
+            if symbol in self.models:
+                self.previous_models[symbol] = self.models[symbol].copy()
+                self.previous_scalers[symbol] = self.scalers[symbol]
+            
+            # Store current models (even if only one is good)
+            self.models[symbol] = {'rf': rf, 'gb': gb}
+            
+            # Initialize feature importance tracking if needed
+            if symbol not in self.feature_importance:
+                self.feature_importance[symbol] = {}
+                
+            # Update feature importance with detailed metrics
+            self.feature_importance[symbol].update({
+                'selected_features': features,
+                'rf_importance': rf.feature_importances_.tolist() if hasattr(rf, 'feature_importances_') else [],
+                'gb_importance': gb.feature_importances_.tolist() if hasattr(gb, 'feature_importances_') else [],
+                'test_accuracy_rf': test_accuracy_rf,
+                'test_accuracy_gb': test_accuracy_gb,
+                'overfit_rf': overfit_rf,
+                'overfit_gb': overfit_gb,
+                'rf_precision': rf_precision,
+                'rf_recall': rf_recall,
+                'rf_f1': rf_f1,
+                'gb_precision': gb_precision,
+                'gb_recall': gb_recall,
+                'gb_f1': gb_f1
+            })
+
+            # Create model version info
+            model_version = f"v_enhanced_{datetime.now().strftime('%Y%m%d_%H%M')}"
+            avg_test_accuracy = (test_accuracy_rf + test_accuracy_gb) / 2
+            
+            self.model_versions[symbol] = {
+                'version': model_version,
+                'training_date': datetime.now(),
+                'accuracy': avg_test_accuracy,
+                'rf_accuracy': test_accuracy_rf,
+                'gb_accuracy': test_accuracy_gb,
+                'rf_precision': rf_precision,
+                'gb_precision': gb_precision,
+                'rf_recall': rf_recall,
+                'gb_recall': gb_recall,
+                'rf_f1': rf_f1,
+                'gb_f1': gb_f1,
+                'training_samples': len(X_train),
+                'test_samples': len(X_test),
+                'feature_count': len(features),
+                'overfit_scores': {'rf': overfit_rf, 'gb': overfit_gb},
+                'target_type': 'enhanced_v2',
+                'acceptance_criteria': {
+                    'rf_acceptable': rf_acceptable,
+                    'gb_acceptable': gb_acceptable,
+                    'max_overfit_threshold': max_overfit_threshold,
+                    'min_test_accuracy': min_test_accuracy
+                }
+            }
+            
+            # Log detailed acceptance info
+            if rf_acceptable and gb_acceptable:
+                print(f"✅ ACCEPTED both models for {symbol}")
+            elif rf_acceptable:
+                print(f"✅ ACCEPTED RF model for {symbol} (GB rejected)")
+            else:
+                print(f"✅ ACCEPTED GB model for {symbol} (RF rejected)")
+                
+            print(f"💾 Saved new ENHANCED model for {symbol} with avg test accuracy: {avg_test_accuracy:.3f}")
+            return True
+        else:
+            # Detailed rejection reasons
+            rejection_reasons = []
+            if overfit_rf >= max_overfit_threshold:
+                rejection_reasons.append(f"RF overfit ({overfit_rf:.3f} >= {max_overfit_threshold})")
+            if test_accuracy_rf < min_test_accuracy:
+                rejection_reasons.append(f"RF low accuracy ({test_accuracy_rf:.3f} < {min_test_accuracy})")
+            if overfit_gb >= max_overfit_threshold:
+                rejection_reasons.append(f"GB overfit ({overfit_gb:.3f} >= {max_overfit_threshold})")
+            if test_accuracy_gb < min_test_accuracy:
+                rejection_reasons.append(f"GB low accuracy ({test_accuracy_gb:.3f} < {min_test_accuracy})")
+                
+            print(f"🚫 REJECTED model for {symbol}: {', '.join(rejection_reasons)}")
+            return False
+
+
+    # Add this method to replace the problematic ones:
+    def train_robust_model(self, symbol: str, df: pd.DataFrame) -> bool:
+        """Unified robust training pipeline"""
+        try:
+            print(f"🎯 ROBUST TRAINING FOR {symbol}")
+            
+            # 1. Prepare data with proper validation
+            features, target = self.prepare_training_data_enhanced_v2(df, symbol=symbol)
+            
+            if features.empty or len(features) < 300:
+                print(f"⚠️ Insufficient data for {symbol}: {len(features)} samples")
+                return False
+            
+            # 2. Simple time series split
+            split_idx = int(len(features) * 0.7)
+            X_train = features.iloc[:split_idx]
+            X_test = features.iloc[split_idx:]
+            y_train = target.iloc[:split_idx]
+            y_test = target.iloc[split_idx:]
+            
+            if len(X_train) < 100 or len(X_test) < 50:
+                print(f"⚠️ Insufficient data after split for {symbol}")
+                return False
+            
+            # 3. Scale features
+            scaler = StandardScaler()
+            X_train_scaled = pd.DataFrame(
+                scaler.fit_transform(X_train), 
+                columns=X_train.columns, 
+                index=X_train.index
+            )
+            X_test_scaled = pd.DataFrame(
+                scaler.transform(X_test), 
+                columns=X_test.columns, 
+                index=X_test.index
+            )
+            
+            # 4. Simple feature selection
+            from sklearn.feature_selection import SelectKBest, f_classif
+            selector = SelectKBest(score_func=f_classif, k=min(10, X_train_scaled.shape[1]))
+            X_train_selected = selector.fit_transform(X_train_scaled, y_train)
+            X_test_selected = selector.transform(X_test_scaled)
+            selected_features = X_train_scaled.columns[selector.get_support()].tolist()
+            
+            print(f"🔍 Selected {len(selected_features)} features for {symbol}")
+            
+            # 5. Train with balanced parameters
+            rf_params = {
+                'n_estimators': 50,  # Reduced from 100
+                'max_depth': 4,      # Reduced from 8
+                'min_samples_split': 20,  # Increased from 10
+                'min_samples_leaf': 10,   # Increased from 5
+                'max_features': 0.3,      # More restrictive
+                'bootstrap': True,
+                'max_samples': 0.7,       # Use subset of data
+                'class_weight': 'balanced',
+                'random_state': 42,
+                'n_jobs': -1
+            }
+            
+            gb_params = {
+                'n_estimators': 80,
+                'max_depth': 6,
+                'learning_rate': 0.1,
+                'min_samples_split': 10,
+                'min_samples_leaf': 5,
+                'subsample': 0.8,
+                'random_state': 42
+            }
+            
+            rf = RandomForestClassifier(**rf_params)
+            gb = GradientBoostingClassifier(**gb_params)
+            
+            rf.fit(X_train_selected, y_train)
+            gb.fit(X_train_selected, y_train)
+            
+            # 6. Validate with realistic thresholds
+            train_pred_rf = rf.predict(X_train_selected)
+            test_pred_rf = rf.predict(X_test_selected)
+            
+            train_acc_rf = accuracy_score(y_train, train_pred_rf)
+            test_acc_rf = accuracy_score(y_test, test_pred_rf)
+            overfit_rf = train_acc_rf - test_acc_rf
+            
+            print(f"📊 {symbol} RF - Train: {train_acc_rf:.3f}, Test: {test_acc_rf:.3f}, Overfit: {overfit_rf:.3f}")
+            
+            # Accept model if reasonable performance
+            if test_acc_rf > 0.48 and overfit_rf < 0.25:
+                self.models[symbol] = {'rf': rf, 'gb': gb}
+                self.scalers[symbol] = scaler
+                self.feature_importance[symbol] = {
+                    'selected_features': selected_features,
+                    'test_accuracy': test_acc_rf
+                }
+                print(f"✅ ACCEPTED model for {symbol} with test accuracy: {test_acc_rf:.3f}")
+                return True
+            else:
+                print(f"❌ REJECTED model for {symbol}: test_acc={test_acc_rf:.3f}, overfit={overfit_rf:.3f}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Robust training failed for {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    # --- 2.7: New Logging Functions ---
+
+    def enable_detailed_logging(self):
+        """Enable comprehensive logging for debugging (Deepseek)"""
+        if logging.getLogger('MLDetailed').hasHandlers():
+            return # Already configured
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('ml_detailed.log'),
+                logging.StreamHandler()
+            ]
+        )
+        
+        self.detailed_logger = logging.getLogger('MLDetailed')
+        print("✅ Detailed ML logging enabled (writing to ml_detailed.log)")
+
+    def log_feature_analysis(self, symbol, features, target):
+        """Detailed feature analysis logging (Deepseek)"""
+        self.detailed_logger.info(f"🔍 FEATURE ANALYSIS FOR {symbol}")
+        self.detailed_logger.info(f"Feature matrix shape: {features.shape}")
+        self.detailed_logger.info(f"Target distribution: {target.value_counts().to_dict()}")
+        
+        # Feature statistics
+        self.detailed_logger.info("Feature statistics:")
+        for col in features.columns:
+            self.detailed_logger.info(f"  {col}: mean={features[col].mean():.4f}, std={features[col].std():.4f}, "
+                                    f"nulls={features[col].isnull().sum()}")
+        
+        # Correlation analysis
+        corr_with_target = []
+        for col in features.columns:
+            if features[col].std() > 0:
+                try:
+                    corr = np.corrcoef(features[col], target)[0, 1] if len(target) == len(features) else 0
+                    corr_with_target.append((col, corr))
+                except Exception:
+                    corr_with_target.append((col, 0.0))
+        
+        corr_with_target.sort(key=lambda x: abs(x[1]), reverse=True)
+        self.detailed_logger.info("Top feature correlations with target:")
+        for col, corr in corr_with_target[:10]:
+            self.detailed_logger.info(f"  {col}: {corr:.3f}")
+
+    def log_training_progress(self, symbol, iteration, metrics):
+        """Log training progress with detailed metrics (Deepseek)"""
+        self.detailed_logger.info(
+            f"🔄 {symbol} Training Iteration {iteration}: "
+            f"Accuracy={metrics.get('accuracy', 0):.3f}, "
+            f"Precision={metrics.get('precision', 0):.3f}, "
+            f"Recall={metrics.get('recall', 0):.3f}, "
+            f"F1={metrics.get('f1', 0):.3f}, "
+            f"Overfit={metrics.get('overfit', 0):.3f}"
+        )
 
     # Add to MLPredictor class
     def should_retrain_model(self, symbol: str, current_accuracy_threshold: float = 0.55) -> bool:
@@ -232,6 +1143,10 @@ class MLPredictor:
         volume = window_data['volume'].astype(float)
 
         try:
+            # NEW: Core TA-Lib Features
+            core_ta_features = self._calculate_core_ta_features(close_prices, high_prices, low_prices, volume)
+            features.update(core_ta_features)
+
             # 1. Symbol-specific volatility scaling
             volatility_20 = close_prices.pct_change().rolling(20).std().iloc[-1]
             features['symbol_specific_volatility'] = volatility_20
@@ -576,6 +1491,33 @@ class MLPredictor:
         
         return features
 
+    def _calculate_core_ta_features(self, close, high, low, volume) -> Dict:
+        """Calculates core TA-Lib features safely."""
+        features = {}
+        try:
+            if len(close) < 25: 
+                return {}
+            
+            # Volatility
+            atr_14 = talib.ATR(high, low, close, timeperiod=14)[-1]
+            features['atr_14_perc'] = (atr_14 / close.iloc[-1]) * 100 if close.iloc[-1] > 0 else 0
+            
+            upper, middle, lower = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+            if middle.iloc[-1] > 0:
+                features['bb_width'] = (upper.iloc[-1] - lower.iloc[-1]) / middle.iloc[-1]
+            else:
+                features['bb_width'] = 0
+            
+            # Trend Strength
+            features['adx_14'] = talib.ADX(high, low, close, timeperiod=14)[-1]
+            
+            # Momentum
+            features['rsi_14'] = talib.RSI(close, timeperiod=14)[-1]
+            
+        except Exception as e:
+            self.logger.warning(f"Error calculating core TA features: {e}")
+        return features
+
     def _calculate_simple_features(self, close, high, low, volume):
         """Simple features for small-cap/volatile symbols"""
         features = {}
@@ -585,8 +1527,8 @@ class MLPredictor:
             if len(close) > period:
                 features[f'returns_{period}'] = close.iloc[-1] / close.iloc[-period-1] - 1
         
-        features['rsi_14'] = self._calculate_rsi_point_in_time(close, 14)
-        features['atr_14'] = self._calculate_atr_point_in_time(high, low, close, 14)
+        # features['rsi_14'] = self._calculate_rsi_point_in_time(close, 14) # Now handled by _calculate_core_ta_features
+        # features['atr_14'] = self._calculate_atr_point_in_time(high, low, close, 14) # Now handled by _calculate_core_ta_features
         
         return features
 
@@ -611,7 +1553,22 @@ class MLPredictor:
             
             # Dynamic threshold based on recent volatility
             volatility = df['close'].pct_change().rolling(20).std().iloc[current_idx - 1]
-            threshold = max(0.015, volatility * threshold_multiplier)
+            
+            # NEW: Use ATR for a dynamic, non-noisy threshold
+            try:
+                atr_data = df.iloc[:current_idx]
+                atr = talib.ATR(atr_data['high'], atr_data['low'], atr_data['close'], timeperiod=14)[-1]
+                atr_percent = atr / current_price if current_price > 0 else 0
+                
+                # Set threshold to a fraction of ATR (e.g., 0.75 * ATR)
+                # This ensures we only target moves that are significant relative to noise
+                dynamic_atr_threshold = atr_percent * 0.75 
+            except Exception as e:
+                self.logger.warning(f"Could not calculate ATR for target, using default: {e}")
+                dynamic_atr_threshold = 0.001
+            
+            # Use the higher of the ATR-based threshold or a 0.1% minimum
+            threshold = max(0.001, dynamic_atr_threshold)
             
             if future_return > threshold:
                 targets.append(1)
@@ -622,74 +1579,600 @@ class MLPredictor:
         
         return targets
 
+    def train_model_improved(self, symbol: str, df: pd.DataFrame) -> bool:
+        """Improved training with better regularization and validation"""
+        try:
+            print(f"🔄 IMPROVED TRAINING FOR {symbol}")
+            
+            # First, analyze feature quality
+            feature_analysis = self.analyze_feature_quality(symbol, df)
+            print(f"Feature analysis: {feature_analysis}")
+            
+            # Debug feature generation
+            self.debug_feature_generation(symbol, df)
+            
+            # Prepare training data with more aggressive filtering
+            features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
+            
+            if features.empty or len(features) < 200:  # Increased minimum samples
+                print(f"⚠️ Insufficient quality data for {symbol}: {len(features)} samples")
+                return False
+            
+            # Analyze target distribution
+            target_counts = target.value_counts()
+            print(f"Target distribution: {target_counts.to_dict()}")
+            
+            # Balance classes if needed
+            if 0 in target_counts and target_counts[0] / len(target) > 0.7:
+                print("⚠️ High proportion of 'Hold' targets, applying balancing...")
+                features, target = self._balance_classes(features, target)
+            
+            # More rigorous train-test split
+            X_train, X_test, y_train, y_test = self.time_series_train_test_split_improved(features, target)
+            
+            if X_train is None:
+                return False
+            
+            # Aggressive feature selection
+            X_train_selected, selected_features = self._select_features_improved(X_train, y_train, symbol)
+            X_test_selected = X_test[selected_features]
+            
+            print(f"🔍 Selected {len(selected_features)} features from {len(features.columns)}")
+            
+            # Train with improved parameters
+            return self._train_with_cross_validation(symbol, X_train_selected, X_test_selected, y_train, y_test, selected_features)
+            
+        except Exception as e:
+            print(f"❌ Improved training failed for {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _balance_classes(self, features: pd.DataFrame, target: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+        """Balance classes by undersampling the majority class"""
+        from sklearn.utils import resample
+        
+        # Separate classes
+        hold_mask = target == 0
+        buy_mask = target == 1
+        sell_mask = target == -1
+        
+        hold_features = features[hold_mask]
+        hold_target = target[hold_mask]
+        buy_features = features[buy_mask]
+        buy_target = target[buy_mask]
+        sell_features = features[sell_mask]
+        sell_target = target[sell_mask]
+        
+        # Find the smallest class size
+        min_size = min(len(hold_features), len(buy_features), len(sell_features))
+        
+        if min_size < 10:  # If any class is too small, don't balance
+            return features, target
+        
+        # Undersample majority classes
+        hold_features_balanced = resample(hold_features, n_samples=min_size, random_state=42)
+        hold_target_balanced = resample(hold_target, n_samples=min_size, random_state=42)
+        buy_features_balanced = resample(buy_features, n_samples=min_size, random_state=42)
+        buy_target_balanced = resample(buy_target, n_samples=min_size, random_state=42)
+        sell_features_balanced = resample(sell_features, n_samples=min_size, random_state=42)
+        sell_target_balanced = resample(sell_target, n_samples=min_size, random_state=42)
+        
+        # Combine balanced data
+        features_balanced = pd.concat([hold_features_balanced, buy_features_balanced, sell_features_balanced])
+        target_balanced = pd.concat([hold_target_balanced, buy_target_balanced, sell_target_balanced])
+        
+        # Shuffle
+        indices = np.random.permutation(len(features_balanced))
+        return features_balanced.iloc[indices], target_balanced.iloc[indices]
+
+    def _select_features_improved(self, X_train: pd.DataFrame, y_train: pd.Series, symbol: str) -> Tuple[pd.DataFrame, List[str]]:
+        """More aggressive feature selection"""
+        # Remove low variance features
+        variances = X_train.var()
+        low_variance = variances[variances < 0.001].index
+        X_filtered = X_train.drop(columns=low_variance)
+        
+        # Remove highly correlated features
+        corr_matrix = X_filtered.corr().abs()
+        upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+        high_corr = [column for column in upper_tri.columns if any(upper_tri[column] > 0.85)]
+        X_filtered = X_filtered.drop(columns=high_corr)
+        
+        # Use mutual information for feature selection
+        from sklearn.feature_selection import mutual_info_classif
+        
+        mi_scores = mutual_info_classif(X_filtered, y_train, random_state=42)
+        mi_series = pd.Series(mi_scores, index=X_filtered.columns)
+        top_features = mi_series.nlargest(min(15, len(mi_series))).index.tolist()  # Reduced to 15 max
+        
+        return X_filtered[top_features], top_features
+
+    def analyze_feature_quality(self, symbol: str, df: pd.DataFrame):
+        """Analyze feature quality and identify potential issues"""
+        features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
+        
+        if features.empty:
+            return {"error": "No features generated"}
+        
+        analysis = {
+            'symbol': symbol,
+            'feature_count': len(features.columns),
+            'target_distribution': target.value_counts().to_dict(),
+            'constant_features': [],
+            'correlated_features': {},
+            'feature_target_correlation': {}
+        }
+        
+        # Check for constant features
+        for col in features.columns:
+            if features[col].std() == 0:
+                analysis['constant_features'].append(col)
+        
+        # Check feature correlations
+        corr_matrix = features.corr().abs()
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i+1, len(corr_matrix.columns)):
+                if corr_matrix.iloc[i, j] > 0.95:
+                    analysis['correlated_features'][corr_matrix.columns[i]] = corr_matrix.columns[j]
+        
+        # Feature-target correlation
+        for col in features.columns:
+            if features[col].std() > 0:  # Skip constant features
+                correlation = np.corrcoef(features[col], target)[0, 1] if len(target) == len(features) else 0
+                analysis['feature_target_correlation'][col] = correlation
+        
+        return analysis
+
+    def debug_feature_generation(self, symbol: str, df: pd.DataFrame):
+        """Debug feature generation process"""
+        print(f"\n🔍 DEBUGGING FEATURE GENERATION FOR {symbol}")
+        print(f"Data shape: {df.shape}")
+        print(f"Data columns: {df.columns.tolist()}")
+        
+        # Test feature generation at multiple points
+        test_indices = [len(df)-1, len(df)-50, len(df)-100]
+        
+        for idx in test_indices:
+            if idx < 50:
+                continue
+                
+            features = self.prepare_features_point_in_time(df, idx, symbol=symbol)
+            print(f"Index {idx}: {len(features.columns) if not features.empty else 0} features")
+            
+            if not features.empty:
+                print(f"Sample features: {features.iloc[0].to_dict()}")
+
     def create_enhanced_target(self, df: pd.DataFrame, current_idx: int, symbol: str = None) -> int:
-        """Create symbol-specific enhanced targets"""
+        """Improved target creation with dynamic, symbol-specific thresholds"""
         
         # Get symbol-specific configuration
         if symbol and symbol in self.symbol_volatility_profiles:
-            profile = self.symbol_volatility_profiles[symbol]
             target_configs = self._get_symbol_specific_target_configs(symbol)
         else:
-            # Fallback to default
             target_configs = self.target_configs
         
-        # Create multi-timeframe targets with symbol-specific configs
-        multi_targets = self.create_multi_timeframe_targets(df, current_idx, target_configs)
-        
-        if not multi_targets:
+        # Calculate recent volatility for dynamic thresholds
+        recent_data = df.iloc[max(0, current_idx-50):current_idx+1]
+        if len(recent_data) < 20:
             return 0
-        
-        # Get market regime context with symbol-specific adjustments
-        close_prices = df['close'].astype(float)
-        
-        data_up_to_current = df.iloc[:current_idx]
-        if len(data_up_to_current) >= 20:
-            volatility = data_up_to_current['close'].pct_change().rolling(20).std().iloc[-1]
-            trend_strength = abs(data_up_to_current['close'].iloc[-1] / data_up_to_current['close'].iloc[-20] - 1)
-        else:
-            volatility = 0.02
-            trend_strength = 0
-        
+            
+        volatility = recent_data['close'].pct_change().std()
         if pd.isna(volatility) or volatility == 0:
             volatility = 0.02
-        if pd.isna(trend_strength):
-            trend_strength = 0
         
-        # Symbol-specific threshold adjustments
-        base_thresholds = self._get_symbol_thresholds(symbol, volatility)
+        # Symbol-specific base thresholds
+        if symbol in ['BTCUSDT', 'ETHUSDT']:
+            base_threshold = volatility * 1.2  # Tighter thresholds for stable coins
+        elif symbol in ['SOLUSDT', 'DOGEUSDT']:
+            base_threshold = volatility * 0.8  # Looser thresholds for volatile coins
+        else:
+            base_threshold = volatility
         
-        # Weighted voting with symbol-specific considerations
-        weighted_vote = 0
-        total_weight = 0
+        # Multi-timeframe prediction with confidence weighting
+        predictions = []
+        confidences = []
         
-        for i, target in enumerate(multi_targets):
-            base_weight = target_configs[i]['weight']
+        for config in target_configs:
+            periods = config['periods']
             
-            # Adjust weights based on symbol type and market regime
-            adjusted_weight = self._adjust_target_weight(base_weight, symbol, trend_strength, volatility)
-                    
-            weighted_vote += target * adjusted_weight
-            total_weight += adjusted_weight
+            if current_idx + periods >= len(df):
+                continue
+                
+            current_price = df['close'].iloc[current_idx]
+            future_price = df['close'].iloc[current_idx + periods]
+            price_change = (future_price - current_price) / current_price
+            
+            # Dynamic threshold based on timeframe and volatility
+            timeframe_threshold = base_threshold * np.sqrt(periods/5)  # Scale with sqrt(time)
+            
+            # Strong signal detection
+            if abs(price_change) > timeframe_threshold * 2.0:
+                confidence = 0.9
+            elif abs(price_change) > timeframe_threshold * 1.5:
+                confidence = 0.7
+            elif abs(price_change) > timeframe_threshold:
+                confidence = 0.6
+            else:
+                continue  # Skip weak signals
+                
+            direction = 1 if price_change > 0 else -1
+            predictions.append(direction)
+            confidences.append(confidence * config['weight'])
         
-        if total_weight > 0:
-            normalized_vote = weighted_vote / total_weight
+        if not predictions:
+            return 0
+        
+        # Weighted ensemble prediction
+        weighted_sum = sum(p * c for p, c in zip(predictions, confidences))
+        total_confidence = sum(confidences)
+        
+        if total_confidence == 0:
+            return 0
+        
+        final_vote = weighted_sum / total_confidence
+        
+        # Convert to trading signal with confidence threshold
+        if abs(final_vote) > 0.3:  # Reduced threshold for more signals
+            return 1 if final_vote > 0 else -1
         else:
-            normalized_vote = 0
+            return 0
+
+    def create_simple_target(self, df: pd.DataFrame, current_idx: int, symbol: str = None) -> int:
+        """Simplified target creation to reduce noise"""
+        if current_idx + 10 >= len(df):
+            return 0
+            
+        current_price = df['close'].iloc[current_idx]
+        future_price = df['close'].iloc[current_idx + 10]  # Fixed 10-period lookahead
         
-        # Convert to trading signal with symbol-specific thresholds
-        strong_threshold = base_thresholds['strong']
-        weak_threshold = base_thresholds['weak']
+        price_change = (future_price - current_price) / current_price
         
-        if normalized_vote > strong_threshold:
-            return 2  # Strong buy
-        elif normalized_vote > weak_threshold:
-            return 1  # Buy
-        elif normalized_vote < -strong_threshold:
-            return -2  # Strong sell
-        elif normalized_vote < -weak_threshold:
-            return -1  # Sell
+        # Use fixed thresholds instead of dynamic ones
+        if symbol in ['BTCUSDT', 'ETHUSDT']:
+            threshold = 0.008  # 0.8% for stable coins
         else:
-            return 0  # Hold
+            threshold = 0.012  # 1.2% for volatile coins
+        
+        if price_change > threshold:
+            return 1
+        elif price_change < -threshold:
+            return -1
+        else:
+            return 0
+
+    def enable_conservative_mode(self):
+        print("🛡️ ENABLING ULTRA-CONSERVATIVE MODE")
+        
+        self.max_features = 6  # Further reduced
+        self.min_training_samples = 600  # Increased
+        self.enable_hyperparameter_optimization = False
+        
+        # Set the safe training method as default
+        self.train_model = self.train_model_safe
+        
+        # Update all symbol configurations
+        for symbol in self.symbol_model_complexity:
+            self.symbol_model_complexity[symbol].update({
+                'max_features': 4,  # Much fewer features
+                'enable_hpo': False,
+                'model_depth': 'ultra_simple'  # New level
+            })
+        
+        self.train_model = self.train_conservative_model
+
+    def train_conservative_model(self, symbol: str, df: pd.DataFrame) -> bool:
+        """Ultra-conservative training to prevent overfitting"""
+        try:
+            print(f"🎯 CONSERVATIVE TRAINING FOR {symbol}")
+            
+            features, target = self.prepare_training_data_enhanced_v2(df, symbol=symbol)
+            
+            if features.empty or len(features) < 400:
+                print(f"⚠️ Insufficient data for {symbol}: {len(features)} samples")
+                return False
+            
+            features = features.iloc[:, :15]
+            
+            X_train, X_test, y_train, y_test = self.time_series_split_conservative(features, target)
+            
+            if X_train is None:
+                return False
+
+            scaler = StandardScaler()
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+            self.scalers[symbol] = scaler
+
+            selected_features = self._stable_feature_selection(X_train_scaled, y_train, X_test_scaled, y_test, symbol, n_features=8)
+            X_train_sel = X_train_scaled[selected_features]
+            X_test_sel = X_test_scaled[selected_features]
+            
+            rf_params, gb_params = self._get_ultra_regularized_params(symbol)
+            
+            rf = RandomForestClassifier(**rf_params)
+            gb = GradientBoostingClassifier(**gb_params)
+            
+            rf.fit(X_train_sel, y_train)
+            gb.fit(X_train_sel, y_train)
+            
+            train_pred_rf = rf.predict(X_train_sel)
+            test_pred_rf = rf.predict(X_test_sel)
+            
+            train_acc_rf = accuracy_score(y_train, train_pred_rf)
+            test_acc_rf = accuracy_score(y_test, test_pred_rf)
+            overfit_rf = train_acc_rf - test_acc_rf
+
+            train_pred_gb = gb.predict(X_train_sel)
+            test_pred_gb = gb.predict(X_test_sel)
+            train_acc_gb = accuracy_score(y_train, train_pred_gb)
+            test_acc_gb = accuracy_score(y_test, test_pred_gb)
+            overfit_gb = train_acc_gb - test_acc_gb
+            
+            max_allowed_overfit = 0.10
+            
+            if overfit_rf > max_allowed_overfit or overfit_gb > max_allowed_overfit:
+                print(f"🚫 REJECTED {symbol}: Overfit RF={overfit_rf:.3f}, GB={overfit_gb:.3f} > {max_allowed_overfit}")
+                return False
+            
+            if test_acc_rf < 0.45 or test_acc_gb < 0.45:
+                print(f"🚫 REJECTED {symbol}: Test accuracy RF={test_acc_rf:.3f}, GB={test_acc_gb:.3f} too low")
+                return False
+
+            if symbol in self.models:
+                self.previous_models[symbol] = self.models[symbol].copy()
+                self.previous_scalers[symbol] = self.scalers[symbol]
+            
+            self.models[symbol] = {'rf': rf, 'gb': gb}
+            
+            if symbol not in self.feature_importance:
+                self.feature_importance[symbol] = {}
+                
+            self.feature_importance[symbol].update({
+                'selected_features': selected_features,
+                'rf_importance': rf.feature_importances_.tolist(),
+                'gb_importance': gb.feature_importances_.tolist(),
+                'test_accuracy': (test_acc_rf + test_acc_gb) / 2,
+                'overfit_score': (overfit_rf + overfit_gb) / 2
+            })
+            
+            print(f"✅ CONSERVATIVE MODEL FOR {symbol}: "
+                  f"RF Train={train_acc_rf:.3f}, Test={test_acc_rf:.3f}, Overfit={overfit_rf:.3f} | "
+                  f"GB Train={train_acc_gb:.3f}, Test={test_acc_gb:.3f}, Overfit={overfit_gb:.3f}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Conservative training failed for {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _get_ultra_regularized_params(self, symbol):
+        """Extremely regularized parameters to combat overfitting"""
+        
+        ultra_rf_params = {
+            'n_estimators': 80,
+            'max_depth': 3,
+            'min_samples_split': 50,
+            'min_samples_leaf': 40,
+            'max_features': 0.3,
+            'bootstrap': True,
+            'max_samples': 0.7,
+            'class_weight': 'balanced',
+            'random_state': 42,
+            'n_jobs': -1
+        }
+        
+        ultra_gb_params = {
+            'n_estimators': 60,
+            'max_depth': 3,
+            'learning_rate': 0.05,
+            'min_samples_split': 40,
+            'min_samples_leaf': 20,
+            'subsample': 0.6,
+            'max_features': 0.4,
+            'random_state': 42
+        }
+        
+        return ultra_rf_params, ultra_gb_params
+
+    def time_series_split_conservative(self, features: pd.DataFrame, target: pd.Series, test_size: float = 0.3, gap: int = 20):
+        if len(features) < 100:
+            return None, None, None, None
+            
+        split_idx = int(len(features) * (1 - test_size))
+        train_end_idx = split_idx - gap
+        
+        if train_end_idx < 50:
+            train_end_idx = split_idx
+            
+        X_train = features.iloc[:train_end_idx]
+        X_test = features.iloc[split_idx:]
+        y_train = target.iloc[:train_end_idx]
+        y_test = target.iloc[split_idx:]
+        
+        if len(X_train) < 50 or len(X_test) < 20:
+            return None, None, None, None
+            
+        return X_train, X_test, y_train, y_test
+
+    def _stable_feature_selection(self, X_train, y_train, X_test, y_test, symbol, n_features=12):
+        """Stable feature selection that preserves feature names"""
+        try:
+            common_features = list(set(X_train.columns) & set(X_test.columns))
+            X_train_common = X_train[common_features]
+            
+            variances = X_train_common.var()
+            stable_features = variances[variances > 0.001].index.tolist()
+            
+            if len(stable_features) < 5:
+                print(f"⚠️ Too few stable features for {symbol}, using fallback")
+                return common_features[:min(8, len(common_features))]
+            
+            selector = SelectKBest(score_func=f_classif, k=min(n_features, len(stable_features)))
+            selector.fit(X_train_common[stable_features], y_train)
+            
+            selected_mask = selector.get_support()
+            selected_features = [stable_features[i] for i in range(len(stable_features)) if selected_mask[i]]
+            
+            print(f"✅ Stable feature selection for {symbol}: {len(selected_features)} features")
+            return selected_features
+            
+        except Exception as e:
+            print(f"⚠️ Stable feature selection failed for {symbol}: {e}")
+            variances = X_train.var()
+            return variances.nlargest(min(8, len(variances))).index.tolist()
+
+    def create_regime_aware_target(self, df: pd.DataFrame, current_idx: int, symbol: str = None) -> int:
+        """Simplified robust target creation"""
+        if current_idx + 15 >= len(df):
+            return 0
+            
+        current_price = df['close'].iloc[current_idx]
+        future_prices = df['close'].iloc[current_idx:current_idx+16]
+        
+        if len(future_prices) < 15:
+            return 0
+            
+        # Calculate future returns at different horizons
+        returns_5 = (future_prices.iloc[4] - current_price) / current_price
+        returns_10 = (future_prices.iloc[9] - current_price) / current_price
+        returns_15 = (future_prices.iloc[14] - current_price) / current_price
+        
+        # Use ATR for dynamic threshold
+        recent_data = df.iloc[max(0, current_idx-20):current_idx+1]
+        if len(recent_data) < 14:
+            return 0
+            
+        try:
+            atr = talib.ATR(recent_data['high'], recent_data['low'], recent_data['close'], timeperiod=14)
+            atr_percent = atr.iloc[-1] / current_price if current_price > 0 else 0.01
+            threshold = atr_percent * 1.5  # 1.5x ATR as threshold
+        except:
+            threshold = 0.01  # Fallback threshold
+        
+        # Weighted decision
+        weighted_return = returns_5 * 0.4 + returns_10 * 0.3 + returns_15 * 0.3
+        
+        if weighted_return > threshold:
+            return 1
+        elif weighted_return < -threshold:
+            return -1
+        else:
+            return 0
+
+    def _detect_current_regime(self, data):
+        """Detect current market regime"""
+        close = data['close']
+        returns = close.pct_change().dropna()
+        
+        if len(returns) < 20:
+            return "unknown"
+        
+        volatility = returns.rolling(10).std().iloc[-1]
+        trend_strength = abs(self._calculate_trend_strength(close, 15))
+        
+        if pd.isna(volatility) or pd.isna(trend_strength):
+            return "unknown"
+
+        if volatility > 0.025:
+            return "high_volatility"
+        elif trend_strength > 0.4:
+            return "trending"
+        else:
+            return "consolidation"
+
+    def _calculate_high_signal_features(self, close, high, low, volume, symbol):
+        """Calculate robust features with proper error handling"""
+        features = {}
+        try:
+            if len(close) < 50:  # Increased minimum
+                return {}
+                
+            # Use iloc safely for pandas operations
+            close_vals = close.values if hasattr(close, 'values') else close
+            high_vals = high.values if hasattr(high, 'values') else high  
+            low_vals = low.values if hasattr(low, 'values') else low
+            volume_vals = volume.values if hasattr(volume, 'values') else volume
+            
+            # 1. Momentum acceleration (safe calculation)
+            if len(close_vals) >= 11:
+                mom_5 = (close_vals[-1] / close_vals[-6] - 1) if len(close_vals) >= 6 else 0
+                mom_10 = (close_vals[-1] / close_vals[-11] - 1) if len(close_vals) >= 11 else 0
+                features['momentum_accel'] = mom_5 - mom_10
+            else:
+                features['momentum_accel'] = 0
+                
+            # 2. Breakout strength (safe rolling calculations)
+            if len(high_vals) >= 20:
+                resistance = np.max(high_vals[-20:])
+                features['breakout_strength'] = (close_vals[-1] - resistance) / close_vals[-1] if close_vals[-1] > resistance else 0
+            else:
+                features['breakout_strength'] = 0
+                
+            # 3. Volume breakout (safe calculation)
+            if len(volume_vals) >= 20:
+                volume_sma = np.mean(volume_vals[-20:])
+                features['volume_breakout'] = (volume_vals[-1] / volume_sma - 1) if volume_sma > 0 else 0
+            else:
+                features['volume_breakout'] = 0
+                
+            # 4. Add core TA features that we know work
+            core_features = self._calculate_core_ta_features(close, high, low, volume)
+            features.update(core_features)
+            
+        except Exception as e:
+            print(f"Error in high signal features for {symbol}: {e}")
+            # Return minimal feature set instead of empty
+            features = {'momentum_accel': 0, 'volume_breakout': 0, 'atr_14_perc': 0.01}
+            
+        return features
+
+    def _calculate_support_quality(self, close, low):
+        """Calculate quality of support levels"""
+        try:
+            if len(low) < 10:
+                return 0
+            recent_lows = low.tail(10)
+            support_level = recent_lows.min()
+            touches = (recent_lows <= support_level * 1.001).sum()
+            return touches / len(recent_lows)
+        except:
+            return 0
+
+    def _calculate_resistance_quality(self, close, high):
+        """Calculate quality of resistance levels"""
+        try:
+            if len(high) < 10:
+                return 0
+            recent_highs = high.tail(10)
+            resistance_level = recent_highs.max()
+            touches = (recent_highs >= resistance_level * 0.999).sum()
+            return touches / len(recent_highs)
+        except:
+            return 0
+
+    def _classify_market_structure(self, close, high, low, window=10):
+        """Classify market structure based on recent highs and lows"""
+        try:
+            if len(close) < window * 2:
+                return 0
+            
+            recent_highs = high.tail(window)
+            prev_highs = high.iloc[-window*2:-window]
+            
+            recent_lows = low.tail(window)
+            prev_lows = low.iloc[-window*2:-window]
+
+            if recent_highs.max() > prev_highs.max() and recent_lows.max() > prev_lows.max():
+                return 1
+            elif recent_highs.min() < prev_highs.min() and recent_lows.min() < prev_lows.min():
+                return -1
+            else:
+                return 0
+        except:
+            return 0
 
     def _get_symbol_specific_target_configs(self, symbol: str) -> List[Dict]:
         """Get symbol-specific target configurations"""
@@ -760,7 +2243,7 @@ class MLPredictor:
         features_list = []
         targets = []
         
-        stride = max(1, len(df) // 200)
+        stride = max(1, len(df) // 400) # Reduced stride to get more samples
         
         # --- FIX: Determine max target period from the correct config ---
         if symbol and symbol in self.symbol_volatility_profiles:
@@ -771,12 +2254,12 @@ class MLPredictor:
         # --- END FIX ---
 
         # --- FIX: Align regime filtering inside the feature generation loop ---
-        tradable_regimes = ['bull_trend', 'bear_trend', 'neutral', 'ranging']
+        tradable_regimes = ['bull_trend', 'bear_trend', 'neutral', 'ranging', 'high_volatility']
         
         for i in range(50, len(df) - max_target_period, stride):
             
             # --- FIX 2: Calculate regime filter AT point-in-time 'i' ---
-            regime_data_for_features = df.iloc[:i+1]
+            regime_data_for_features = df.iloc[:i]
             if len(regime_data_for_features) < 100:
                 continue
             regime = self._detect_training_regime(regime_data_for_features, symbol)
@@ -892,6 +2375,12 @@ class MLPredictor:
             if not hasattr(self, 'model_versions'):
                 self.model_versions = {}
             
+            # ✅ FIX: Initialize feature_importance for this symbol
+            if not hasattr(self, 'feature_importance'):
+                self.feature_importance = {}
+            if symbol not in self.feature_importance:
+                self.feature_importance[symbol] = {}
+            
             if symbol in self.models:
                 self.previous_models[symbol] = self.models[symbol].copy()
                 self.previous_scalers[symbol] = self.scalers[symbol]
@@ -915,6 +2404,8 @@ class MLPredictor:
                 self._record_training_failure(symbol, "split_failed")
                 return False
 
+            # --- NEW: Log training details ---
+            self.log_training_details(symbol, features, target, X_train, X_test)
             # --- FIX 1: Perform Feature Selection *AFTER* split, *ONLY* on (X_train, y_train) ---
             X_train_selected, selected_features = self._select_features(X_train, y_train, symbol)
             # Apply the *same* selected features to the test set
@@ -951,6 +2442,11 @@ class MLPredictor:
             rf_f1 = f1_score(y_test, rf_pred, average='weighted', zero_division=0)
             gb_f1 = f1_score(y_test, gb_pred, average='weighted', zero_division=0)
 
+            print(f"\n--- {symbol} RF Classification Report ---")
+            print(classification_report(y_test, rf_pred, zero_division=0))
+            print(f"--- {symbol} GB Classification Report ---")
+            print(classification_report(y_test, gb_pred, zero_division=0))
+
             # Overfitting detection
             rf_train_pred = rf.predict(X_train_scaled)
             rf_train_accuracy = accuracy_score(y_train, rf_train_pred)
@@ -962,6 +2458,11 @@ class MLPredictor:
             
             if rf_overfit > 0.15 or gb_overfit > 0.15:
                 print(f"⚠️ Potential overfitting detected for {symbol}: RF={rf_overfit:.3f}, GB={gb_overfit:.3f}")
+                # --- ADDED: Reject model if overfitting is too high ---
+                print(f"❌ Rejecting model for {symbol} due to high overfitting.")
+                self._record_training_failure(symbol, "overfitting_reject")
+                return False
+                # --- END ADDED ---
 
             # Store models and metadata
             if not hasattr(self, 'models'):
@@ -1215,7 +2716,25 @@ class MLPredictor:
             if features.empty or target.empty:
                 return {'success': False, 'reason': 'Insufficient data'}
 
-            tscv = TimeSeriesSplit(n_splits=n_splits, test_size=50, gap=10)
+            # --- DYNAMIC SPLIT CALCULATION ---
+            min_train_size = 50
+            test_size = 50
+            gap = 10
+            n_samples = len(features)
+            
+            # Calculate max possible splits
+            # Formula: (n_samples - min_train_size - gap) // (test_size + gap)
+            max_possible_splits = (n_samples - min_train_size - gap) // (test_size + gap)
+            
+            if n_splits > max_possible_splits:
+                n_splits = max(1, max_possible_splits)
+                print(f"⚠️ Walk-forward splits reduced to {n_splits} due to limited sample size ({n_samples})")
+            
+            if n_splits < 1:
+                return {'success': False, 'reason': f'Not enough samples ({n_samples}) for even 1 walk-forward split'}
+            # --- END DYNAMIC SPLIT ---
+
+            tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_size, gap=gap)
             performances = []
             feature_importances = []
             
@@ -1343,7 +2862,7 @@ class MLPredictor:
                 return self.fallback_prediction_strategy(symbol, df)
             
             # Prepare features with symbol-specific configuration
-            features = self.prepare_features_point_in_time(df, len(df)-1, symbol=symbol)
+            features = self.prepare_features_point_in_time(df, len(df), symbol=symbol)
             
             if features.empty:
                 return self.fallback_prediction_strategy(symbol, df)
@@ -1833,75 +3352,152 @@ class MLPredictor:
         except:
             return 0.0
 
+
+    def analyze_feature_quality(self, symbol: str, df: pd.DataFrame):
+        """Analyze feature quality and identify potential issues"""
+        features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
+        
+        if features.empty:
+            return {"error": "No features generated"}
+        
+        analysis = {
+            'symbol': symbol,
+            'feature_count': len(features.columns),
+            'target_distribution': target.value_counts().to_dict(),
+            'constant_features': [],
+            'correlated_features': {},
+            'feature_target_correlation': {}
+        }
+        
+        # Check for constant features
+        for col in features.columns:
+            if features[col].std() == 0:
+                analysis['constant_features'].append(col)
+        
+        # Check feature correlations
+        corr_matrix = features.corr().abs()
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i+1, len(corr_matrix.columns)):
+                if corr_matrix.iloc[i, j] > 0.95:
+                    col1 = corr_matrix.columns[i]
+                    col2 = corr_matrix.columns[j]
+                    if col1 not in analysis['correlated_features']:
+                         analysis['correlated_features'][col1] = []
+                    analysis['correlated_features'][col1].append(col2)
+        
+        # Feature-target correlation
+        for col in features.columns:
+            if features[col].std() > 0:  # Skip constant features
+                try:
+                    correlation = np.corrcoef(features[col], target)[0, 1] if len(target) == len(features) else 0
+                    analysis['feature_target_correlation'][col] = correlation
+                except Exception:
+                    analysis['feature_target_correlation'][col] = 0.0
+        
+        return analysis
+
+    def debug_feature_generation(self, symbol: str, df: pd.DataFrame):
+        """Debug feature generation process"""
+        print(f"\n🔍 DEBUGGING FEATURE GENERATION FOR {symbol}")
+        print(f"Data shape: {df.shape}")
+        
+        # Test feature generation at multiple points
+        test_indices = [len(df)-1, len(df)-50, len(df)-100]
+        
+        for idx in test_indices:
+            if idx < 50:
+                continue
+                
+            features = self.prepare_features_point_in_time(df, idx, symbol=symbol)
+            print(f"Index {idx}: {len(features.columns) if not features.empty else 0} features")
+            
+            if not features.empty:
+                print(f"   Sample features (first 5): {dict(list(features.iloc[0].to_dict().items())[:5])}")
+
+    def log_training_details(self, symbol: str, features: pd.DataFrame, target: pd.Series, 
+                            X_train: pd.DataFrame, X_test: pd.DataFrame):
+        """Log detailed training information"""
+        try:
+            log_message = f"""
+            🎯 TRAINING DETAILS FOR {symbol}
+            =================================
+            Overall Statistics:
+            - Total samples: {len(features)}
+            - Training samples: {len(X_train)}
+            - Test samples: {len(X_test)}
+            - Feature count (original): {len(features.columns)}
+            
+            Target Distribution:
+            {target.value_counts(normalize=True).to_dict()}
+            
+            Feature Statistics:
+            - Mean features per sample: {features.mean().mean():.4f}
+            - Std features per sample: {features.std().mean():.4f}
+            - Features with zero variance: {len(features.columns[features.std() == 0])}
+            """
+            print(log_message)
+        except Exception as e:
+            print(f"Error logging training details: {e}")
+
     # Keep all other existing methods (feature selection, drift detection, etc.)
     # They remain largely the same but now work with enhanced targets
 
     def _select_features(self, X_train: pd.DataFrame, y_train: pd.Series, symbol: str) -> Tuple[pd.DataFrame, List[str]]:
-        """Feature selection implementation with better error handling"""
+        """More aggressive feature selection"""
         try:
-            if len(X_train.columns) <= self.max_features:
-                selected_features = X_train.columns.tolist()
-                print(f"🔍 Feature selection for {symbol}: Using all {len(selected_features)} features")
-                return X_train, selected_features
+            # Get max features from symbol config
+            max_features = self.max_features
+            if symbol in self.symbol_model_complexity:
+                max_features = self.symbol_model_complexity[symbol]['max_features']
             
-            # === FIX: Ensure consistent feature naming ===
-            original_features = X_train.columns.tolist()
+            # Remove low variance features
+            variances = X_train.var()
+            low_variance = variances[variances < 0.001].index
+            X_filtered = X_train.drop(columns=low_variance)
             
-            if self.feature_selection_method == 'importance':
-                rf_temp = RandomForestClassifier(**self.rf_params)
-                rf_temp.fit(X_train, y_train)
-                
-                importance_df = pd.DataFrame({
-                    'feature': X_train.columns,
-                    'importance': rf_temp.feature_importances_
-                }).sort_values('importance', ascending=False)
-                
-                selected_features = importance_df.head(self.max_features)['feature'].tolist()
-                X_selected = X_train[selected_features]
-                
-            elif self.feature_selection_method == 'rfe':
-                estimator = RandomForestClassifier(**self.rf_params)
-                selector = RFE(estimator, n_features_to_select=self.max_features, step=5)
-                selector.fit(X_train, y_train)
-                selected_features = X_train.columns[selector.support_].tolist()
-                X_selected = X_train[selected_features]
-                
-            elif self.feature_selection_method == 'lasso':
-                lasso = LassoCV(cv=5, random_state=42)
-                lasso.fit(X_train, y_train)
-                
-                importance_df = pd.DataFrame({
-                    'feature': X_train.columns,
-                    'coefficient': lasso.coef_
-                }).sort_values('coefficient', key=abs, ascending=False)
-                
-                selected_features = importance_df.head(self.max_features)['feature'].tolist()
-                X_selected = X_train[selected_features]
-                
-            else:
-                # Default: remove highly correlated features
-                corr_matrix = X_train.corr().abs()
-                upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-                to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
-                selected_features = [col for col in X_train.columns if col not in to_drop][:self.max_features]
-                X_selected = X_train[selected_features]
+            if len(low_variance) > 0:
+                print(f"   Removed {len(low_variance)} low-variance features")
+
+            # Remove highly correlated features
+            corr_matrix = X_filtered.corr().abs()
+            upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+            high_corr = [column for column in upper_tri.columns if any(upper_tri[column] > 0.85)]
+            X_filtered = X_filtered.drop(columns=high_corr)
             
-            print(f"🔍 Feature selection for {symbol}: {len(selected_features)} features selected from {len(X_train.columns)}")
+            if len(high_corr) > 0:
+                print(f"   Removed {len(high_corr)} highly-correlated features")
+
+            if X_filtered.empty:
+                print("⚠️ No features left after variance and correlation filtering.")
+                return X_train.iloc[:, :max_features], X_train.columns.tolist()[:max_features]
+
+            # Use mutual information for feature selection
+            mi_scores = mutual_info_classif(X_filtered, y_train, random_state=42)
+            mi_series = pd.Series(mi_scores, index=X_filtered.columns)
+            top_features = mi_series.nlargest(min(max_features, len(mi_series))).index.tolist()
+            
+            if not top_features:
+                 print("⚠️ Mutual information selection returned no features. Using fallback.")
+                 return X_train.iloc[:, :max_features], X_train.columns.tolist()[:max_features]
+            
+            print(f"🔍 Feature selection for {symbol}: {len(top_features)} features selected from {len(X_train.columns)}")
             
             if symbol not in self.feature_importance:
                 self.feature_importance[symbol] = {}
             
-            self.feature_importance[symbol]['selected_features'] = selected_features
+            self.feature_importance[symbol]['selected_features'] = top_features
             self.feature_importance[symbol]['original_feature_count'] = len(X_train.columns)
-            self.feature_importance[symbol]['all_available_features'] = original_features
+            self.feature_importance[symbol]['all_available_features'] = X_train.columns.tolist()
             
-            return X_selected, selected_features
-            
+            return X_filtered[top_features], top_features
+
         except Exception as e:
             print(f"⚠️ Feature selection failed for {symbol}: {e}")
-            # Fallback: use features with highest variance
-            variances = X_train.var().sort_values(ascending=False)
-            selected_features = variances.head(self.max_features).index.tolist()
+            max_features = self.max_features
+            if symbol in self.symbol_model_complexity:
+                max_features = self.symbol_model_complexity[symbol]['max_features']
+                
+            selected_features = X_train.columns.tolist()[:max_features]
             
             if symbol not in self.feature_importance:
                 self.feature_importance[symbol] = {}
@@ -1945,15 +3541,19 @@ class MLPredictor:
             else:
                 return X_train.values, None
 
-    def time_series_train_test_split(self, features: pd.DataFrame, target: pd.Series, test_size: float = 0.2):
+    def time_series_train_test_split(self, features: pd.DataFrame, target: pd.Series, test_size: float = 0.2, gap: int = 10):
         if len(features) < 100:
             return None, None, None, None
             
         split_idx = int(len(features) * (1 - test_size))
+        train_end_idx = split_idx - gap
         
-        X_train = features.iloc[:split_idx]
+        if train_end_idx < 50:
+            train_end_idx = split_idx
+            
+        X_train = features.iloc[:train_end_idx]
         X_test = features.iloc[split_idx:]
-        y_train = target.iloc[:split_idx]
+        y_train = target.iloc[:train_end_idx]
         y_test = target.iloc[split_idx:]
         
         if len(X_train) < 50 or len(X_test) < 10:
@@ -2730,24 +4330,36 @@ class MLPredictor:
             'suggestions': []
         }
         
-        test_indices = [100, 200, 300]
-        feature_sets = []
-        
-        for idx in test_indices:
-            if idx < len(df):
-                features = self.prepare_features_point_in_time(df, idx, symbol=symbol)
-                if not features.empty:
-                    feature_sets.append(features.iloc[0].to_dict())
-        
-        if len(feature_sets) > 1:
-            first_features = feature_sets[0]
-            for i in range(1, len(feature_sets)):
-                similarity = sum(1 for k in first_features if k in feature_sets[i] and first_features[k] == feature_sets[i][k]) / len(first_features)
-                if similarity > 0.9:
-                    leakage_report['issues'].append(f"High feature similarity ({similarity:.2f}) across different time periods")
-                    leakage_report['suggestions'].append("Check for static features or improper windowing")
-        
         features, target = self.prepare_training_data_enhanced(df, symbol=symbol)
+        
+        if not features.empty:
+            constant_features = features.columns[features.std() == 0]
+            if len(constant_features) > 0:
+                leakage_report['issues'].append(f"Constant features detected: {list(constant_features)}")
+                leakage_report['suggestions'].append("Review feature calculation; constant features provide no value")
+        
+            if symbol and symbol in self.symbol_volatility_profiles:
+                target_configs = self._get_symbol_specific_target_configs(symbol)
+            else:
+                target_configs = self.target_configs
+            max_target_period = max([c['periods'] for c in target_configs])
+            
+            future_returns = df['close'].pct_change(max_target_period).shift(-max_target_period).dropna()
+            
+            if not future_returns.empty:
+                aligned_data = features.iloc[:len(future_returns)].copy()
+                aligned_returns = future_returns.iloc[:len(aligned_data)]
+                
+                if not aligned_data.empty and not aligned_returns.empty:
+                    for col in aligned_data.columns:
+                        try:
+                            corr = np.corrcoef(aligned_data[col], aligned_returns)[0,1]
+                            if abs(corr) > 0.5:
+                                leakage_report['issues'].append(f"High correlation with future returns in {col}: {corr:.3f}")
+                                leakage_report['suggestions'].append(f"Feature {col} may be leaking future information")
+                        except Exception as e:
+                            self.logger.warning(f"Could not calculate leakage correlation for {col}: {e}")
+
         if not target.empty:
             target_counts = target.value_counts()
             if 0 in target_counts and target_counts[0] / len(target) > 0.8:
