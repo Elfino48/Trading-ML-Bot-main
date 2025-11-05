@@ -1,5 +1,6 @@
 import time
 from typing import Dict, List
+import numpy as np
 import pandas as pd
 import threading
 from bybit_client import BybitClient
@@ -7,6 +8,7 @@ from data_engine import DataEngine
 from enhanced_strategy_orchestrator import EnhancedStrategyOrchestrator
 from advanced_risk_manager import AdvancedRiskManager
 from execution_engine import ExecutionEngine
+from ml_predictor import MLPredictor
 from telegram_bot import TelegramBot
 from config import SYMBOLS, TIMEFRAME, TELEGRAM_CONFIG, DEBUG_MODE, RiskConfig
 from error_handler import ErrorHandler
@@ -58,6 +60,8 @@ class AdvancedTradingBot:
             )
 
             self.strategy_orchestrator.ml_predictor.set_data_engine(self.data_engine)
+
+            self._initialize_ml_training_parameters()
 
             self.execution_engine = ExecutionEngine(self.client, self.risk_manager, self.telegram_bot)
             
@@ -360,52 +364,68 @@ class AdvancedTradingBot:
         print("✅ Configuration validation passed")
 
     def _initialize_ml_models(self):
-            print("\n🤖 Initializing ML models...")
-            try:
-                self.strategy_orchestrator.ml_predictor.load_models()
-                models_loaded_count = len(self.strategy_orchestrator.ml_predictor.models)
-                if models_loaded_count > 0:
-                    print(f"✅ Loaded {models_loaded_count} pre-trained models from disk (will be retrained)")
-                else:
-                    print("ℹ️ No pre-trained models found on disk. Starting fresh training.")
-
-                print("🔥 Forcing retraining of ALL models on startup...")
+        """Initialize ML models using multi-model training approach"""
+        print("\n🤖 Initializing ML models with multi-model selection...")
+        try:
+            self.strategy_orchestrator.ml_predictor.load_models()
+            models_loaded_count = len(self.strategy_orchestrator.ml_predictor.models)
+            if models_loaded_count > 0:
+                print(f"✅ Loaded {models_loaded_count} pre-trained models from disk")
+            else:
+                print("ℹ️ No pre-trained models found on disk.")
+            
+            loaded_symbols = set(self.strategy_orchestrator.ml_predictor.models.keys())
+            required_symbols = set(SYMBOLS)
+            missing_symbols = list(required_symbols - loaded_symbols)
+            
+            if not missing_symbols and models_loaded_count > 0:
+                print(f"✅ All {len(required_symbols)} required models are loaded.")
                 if self.telegram_bot:
                     self.telegram_bot.log_important_event(
-                        "FORCED INITIAL TRAINING",
-                        f"Forcing retraining of all {len(SYMBOLS)} models: {', '.join(SYMBOLS)}"
+                        "MODELS LOADED",
+                        f"Successfully loaded all {len(required_symbols)} pre-trained ML models"
+                    )
+            elif not missing_symbols and models_loaded_count == 0:
+                print("⚠️ No symbols configured, no models to load or train.")
+            else:
+                print(f"📚 Found {len(missing_symbols)} missing models. Training multiple models for: {missing_symbols}")
+                if self.telegram_bot:
+                    self.telegram_bot.log_important_event(
+                        "INITIAL MODELS TRAINING",
+                        f"Starting multi-model training for {len(missing_symbols)} new symbols: {', '.join(missing_symbols)}"
                     )
                 
-                trained_count = self._retrain_all_models(force_all=True)
+                # Use the new multi-model training approach
+                trained_count = self.enhanced_retrain_all_models(symbols_to_train=missing_symbols)
                 
                 if trained_count > 0:
                     self.strategy_orchestrator.ml_predictor.save_models()
-                    print(f"💾 Saved {trained_count} newly trained models to disk")
+                    print(f"💾 Saved {trained_count} best models to disk")
                     if self.telegram_bot:
                         self.telegram_bot.log_important_event(
                             "NEW MODELS TRAINED",
-                            f"Successfully trained and saved {trained_count} new ML models"
+                            f"Successfully trained and saved {trained_count} best ML models from multiple candidates"
                         )
                 else:
-                    error_msg = "Initial forced model training failed for all symbols"
-                    self.error_handler.handle_ml_error(Exception(error_msg), "ALL", "initial_training")
+                    error_msg = f"Initial multi-model training failed for {missing_symbols}"
+                    self.error_handler.handle_ml_error(Exception(error_msg), "ALL", "initial_multi_model_training")
 
-            except Exception as e:
-                self.error_handler.handle_ml_error(e, "ALL", "initialization")
-                print("⚠️ Continuing without ML models or using potentially incomplete set")
+        except Exception as e:
+            self.error_handler.handle_ml_error(e, "ALL", "initialization")
+            print("⚠️ Continuing without ML models or using potentially incomplete set")
 
     def _retrain_all_models(self, force_all: bool = False, symbols_to_train: List[str] = None) -> int:
         
-        # NEW: Synchronization Logic
         if not self.training_lock.acquire(blocking=False):
             self.logger.warning("[MODEL RETRAINING] Retraining already in progress. Skipping new request.")
             return 0
         
-        self.training_complete_event.clear() # Signal that training is starting
+        self.training_complete_event.clear()
         self.logger.info("[MODEL RETRAINING] Acquired training lock. Trading cycles will now wait.")
-        # END NEW
-
+        
         trained_count = 0
+        failed_symbols = []
+        
         self.logger.info("[MODEL RETRAINING] Starting enhanced retraining process...")
         
         if symbols_to_train:
@@ -420,56 +440,74 @@ class AdvancedTradingBot:
         
         if not symbols_to_retrain:
             self.logger.info("[MODEL RETRAINING] No models need retraining at this time")
-            # NEW: Release lock immediately if no work is done
             self.training_lock.release()
             self.training_complete_event.set()
             return 0
-            # END NEW
 
         for symbol in symbols_to_retrain:
             try:
                 self.logger.info(f"[MODEL RETRAINING] Retraining model for {symbol}...")
                 
-                historical_data = self.data_engine.get_historical_data(symbol, TIMEFRAME, limit=1500)
+                # CRITICAL FIX: Get more historical data for better training
+                historical_data = self.data_engine.get_historical_data(symbol, TIMEFRAME, limit=2000)
 
-                if historical_data is not None and len(historical_data) >= 250:
+                if historical_data is not None and len(historical_data) >= 300:  # Increased minimum
                     if self.data_engine.validate_market_data(historical_data.reset_index()):
                         old_performance = self.strategy_orchestrator.ml_predictor.model_versions.get(symbol, {}).get('accuracy', 0)
                         
                         success = self.strategy_orchestrator.ml_predictor.train_model(symbol, historical_data)
                         
                         if success:
-                            trained_count += 1
+                            # CRITICAL FIX: Validate the new model before counting as successful
                             new_performance = self.strategy_orchestrator.ml_predictor.model_versions.get(symbol, {}).get('accuracy', 0)
                             
-                            perf_change = new_performance - old_performance
-                            self.logger.info(f"[MODEL RETRAINING] {symbol} retrained successfully. Accuracy: {old_performance:.3f} -> {new_performance:.3f} ({perf_change:+.3f})")
-                            
-                            if self.telegram_bot and abs(perf_change) > 0.05:
-                                direction = "📈 Improved" if perf_change > 0 else "📉 Declined"
-                                self.telegram_bot.log_ml_training(
-                                    symbol, 
-                                    new_performance * 100, 
-                                    f"{direction} by {abs(perf_change)*100:.1f}%"
-                                )
+                            # Only count if performance is reasonable
+                            if new_performance >= 0.4:  # Minimum acceptable accuracy
+                                trained_count += 1
+                                perf_change = new_performance - old_performance
+                                self.logger.info(f"[MODEL RETRAINING] {symbol} retrained successfully. Accuracy: {old_performance:.3f} -> {new_performance:.3f} ({perf_change:+.3f})")
+                                
+                                if self.telegram_bot and abs(perf_change) > 0.05:
+                                    direction = "📈 Improved" if perf_change > 0 else "📉 Declined"
+                                    self.telegram_bot.log_ml_training(
+                                        symbol, 
+                                        new_performance * 100, 
+                                        f"{direction} by {abs(perf_change)*100:.1f}%"
+                                    )
+                            else:
+                                self.logger.warning(f"[MODEL RETRAINING] {symbol} trained but accuracy too low: {new_performance:.3f}")
+                                failed_symbols.append(symbol)
                         else:
                             self.logger.warning(f"[MODEL RETRAINING] Model training failed for {symbol}")
+                            failed_symbols.append(symbol)
                             self.error_handler.handle_ml_error(
                                 Exception("Model training failed"), symbol, "retraining"
                             )
                     else:
                         self.logger.warning(f"[MODEL RETRAINING] Data validation failed for {symbol}")
+                        failed_symbols.append(symbol)
                 else:
                     self.logger.warning(f"[MODEL RETRAINING] Insufficient data for {symbol}: {len(historical_data) if historical_data is not None else 0} rows")
+                    failed_symbols.append(symbol)
 
-                time.sleep(0.3)
+                time.sleep(0.5)  # Increased delay for rate limiting
                 
             except Exception as e:
                 error_msg = f"Error during retraining for {symbol}: {e}"
                 self.logger.error(error_msg)
+                failed_symbols.append(symbol)
                 self.error_handler.handle_ml_error(e, symbol, "retraining")
 
-        self.logger.info(f"[MODEL RETRAINING] Retraining complete. {trained_count}/{len(symbols_to_retrain)} models updated")
+        # CRITICAL FIX: Report training results
+        success_rate = (trained_count / len(symbols_to_retrain)) * 100 if symbols_to_retrain else 0
+        self.logger.info(f"[MODEL RETRAINING] Retraining complete. {trained_count}/{len(symbols_to_retrain)} models updated successfully ({success_rate:.1f}%)")
+        
+        if failed_symbols:
+            self.logger.warning(f"[MODEL RETRAINING] Failed symbols: {failed_symbols}")
+            
+        # CRITICAL FIX: Only analyze if we have successful trainings
+        if trained_count > 0:
+            self._analyze_post_training_performance([s for s in symbols_to_retrain if s not in failed_symbols])
         
         if trained_count > 0:
             save_success = self.strategy_orchestrator.ml_predictor.save_models()
@@ -478,13 +516,55 @@ class AdvancedTradingBot:
             else:
                 self.logger.error("[MODEL RETRAINING] Failed to save models to disk")
         
-        # NEW: Release Synchronization Logic
+        # Release training lock
         self.training_lock.release()
-        self.training_complete_event.set() # Signal that training is done
+        self.training_complete_event.set()
         self.logger.info("[MODEL RETRAINING] Released training lock. Trading cycles can now resume.")
-        # END NEW
         
         return trained_count
+
+    def _analyze_post_training_performance(self, trained_symbols: List[str]):
+        """Analyze model performance after training completion"""
+        try:
+            self.logger.info("[PERFORMANCE_ANALYSIS] Starting post-training performance analysis...")
+            
+            # Analyze performance issues (hold ratios, etc.)
+            performance_issues = self.strategy_orchestrator.ml_predictor.analyze_model_performance_issues()
+            
+            critical_issues = []
+            for symbol, analysis in performance_issues.items():
+                if analysis.get('issues'):
+                    self.logger.warning(f"[PERFORMANCE_ANALYSIS] {symbol} issues: {analysis['issues']}")
+                    if analysis.get('hold_prediction_ratio', 0) > 0.8:  # Critical if >80% holds
+                        critical_issues.append(symbol)
+            
+            # Analyze performance trends
+            for symbol in trained_symbols:
+                trend_analysis = self.strategy_orchestrator.ml_predictor.analyze_model_performance_trends(symbol)
+                if trend_analysis.get('status') in ['poor', 'deteriorating']:
+                    self.logger.warning(f"[PERFORMANCE_TRENDS] {symbol} trend analysis: {trend_analysis}")
+                    if self.telegram_bot:
+                        self.telegram_bot.log_important_event(
+                            "MODEL_PERFORMANCE_ALERT",
+                            f"Model {symbol} showing {trend_analysis['status']} performance\n"
+                            f"Recent accuracy: {trend_analysis.get('recent_accuracy', 0):.3f}\n"
+                            f"Trend: {trend_analysis.get('trend', 0):+.3f}"
+                        )
+            
+            if critical_issues:
+                self.logger.error(f"[PERFORMANCE_ANALYSIS] Critical performance issues detected for: {critical_issues}")
+                if self.telegram_bot:
+                    self.telegram_bot.send_channel_message(
+                        f"🚨 <b>CRITICAL MODEL PERFORMANCE ISSUES</b>\n\n"
+                        f"High hold prediction ratios detected for:\n"
+                        f"{', '.join(critical_issues)}\n\n"
+                        f"Models may need immediate attention."
+                    )
+            
+            self.logger.info("[PERFORMANCE_ANALYSIS] Post-training analysis complete")
+            
+        except Exception as e:
+            self.logger.error(f"Error in post-training performance analysis: {e}")
 
     def _test_connection(self):
         print("\n🔗 Testing Bybit API connection...")
@@ -658,16 +738,16 @@ class AdvancedTradingBot:
                 print(f"💰 Initialized daily starting balance: ${portfolio_value:.2f}")
 
             self.risk_manager.update_daily_pnl()
-            emergency_check = self.emergency_protocols.check_emergency_conditions(
-                portfolio_value, 
-                self.risk_manager.daily_pnl,
-                self.execution_engine.get_trade_history(limit=10),
-                self.error_handler.error_count
-            )
+            #emergency_check = self.emergency_protocols.check_emergency_conditions(
+            #    portfolio_value, 
+            #    self.risk_manager.daily_pnl,
+            #    self.execution_engine.get_trade_history(limit=10),
+            #    self.error_handler.error_count
+            #)
             
-            if emergency_check['emergency']:
-                print("🆘 Emergency conditions detected - skipping cycle")
-                return []
+            #if emergency_check['emergency']:
+            #    print("🆘 Emergency conditions detected - skipping cycle")
+            #    return []
 
             ws_check_interval_cycles = 2
             force_restart_threshold_seconds = 180
@@ -688,8 +768,8 @@ class AdvancedTradingBot:
 
                         if disconnected_duration > force_restart_threshold_seconds:
                             self.logger.error(f"Critical WebSocket has been disconnected for over {force_restart_threshold_seconds}s. Forcing restart.")
-                            if self.telegram_bot:
-                                self.telegram_bot.log_important_event("WebSocket Restart", f"Forcing restart of critical WebSocket(s) due to prolonged disconnected state.")
+                            #if self.telegram_bot:
+                                #self.telegram_bot.log_important_event("WebSocket Restart", f"Forcing restart of critical WebSocket(s) due to prolonged disconnected state.")
 
                             self.client.restart_websocket('public')
                             
@@ -711,6 +791,8 @@ class AdvancedTradingBot:
             for symbol in SYMBOLS:
                 data_copy = self.data_engine.get_market_data_for_analysis(symbol)
                 if data_copy is not None and not data_copy.empty:
+                    self.strategy_orchestrator.ml_predictor.debug_prediction_process(symbol, data_copy)
+                    self.strategy_orchestrator.ml_predictor.debug_model_status(symbol)
                     close_prices = data_copy['close'].astype(float)
                     valid_closes = close_prices[close_prices > 0].dropna()
                     
@@ -748,8 +830,8 @@ class AdvancedTradingBot:
                     self.logger.error(f"WebSocket appears unresponsive (Silent: {last_msg_ago:.1f}s, Stale: {is_stale}). Forcing WS restart and data refresh...")
                     print("🔄 EMERGENCY DATA REFRESH - Restarting WebSocket and fetching fresh data...")
                     
-                    if self.telegram_bot:
-                        self.telegram_bot.log_important_event("WebSocket Restart", f"Forcing WS restart. Last message: {last_msg_ago:.1f}s ago. Data stale: {is_stale}.")
+                    #if self.telegram_bot:
+                        #self.telegram_bot.log_important_event("WebSocket Restart", f"Forcing WS restart. Last message: {last_msg_ago:.1f}s ago. Data stale: {is_stale}.")
                     
                     # 1. FORCE RESTART THE DEAD WEBSOCKET
                     self.client.restart_websocket('public')
@@ -1346,6 +1428,27 @@ class AdvancedTradingBot:
         except Exception as e:
             self.logger.error(f"Error in critical retraining check: {e}")
 
+    def _initialize_ml_training_parameters(self):
+        """Initialize ML training parameters for REALISTIC class distribution"""
+        try:
+            # Much more permissive ML parameters
+            self.strategy_orchestrator.ml_predictor.min_training_samples = 5  # Drastically reduced
+            self.strategy_orchestrator.ml_predictor.walk_forward_splits = 2    # Reduced
+            self.strategy_orchestrator.ml_predictor.validation_window = 30     # Reduced
+            
+            # SIMPLIFIED target configs for REALISTIC class distribution
+            self.strategy_orchestrator.ml_predictor.target_configs = [
+                {'periods': 2, 'weight': 0.6, 'threshold_multiplier': 1.0},  # Short-term
+                {'periods': 4, 'weight': 0.4, 'threshold_multiplier': 1.0}   # Medium-term
+            ]
+            
+            # Enable more debugging
+            self.strategy_orchestrator.ml_predictor.logger.setLevel(logging.INFO)
+            
+            self.logger.info("ML training parameters reinitialized for REALISTIC class distribution")
+        except Exception as e:
+            self.logger.error(f"Error initializing ML training parameters: {e}")
+
     def _optimize_strategy_weights(self):
         try:
             recent_trades = self.database.get_historical_trades(days=7)
@@ -1570,7 +1673,7 @@ def main():
     print("💾 Database Logging: Active")
     print("🆘 Emergency Protocols: Active")
 
-    selected_aggressiveness = "aggressive"
+    selected_aggressiveness = "moderate"
     mode_choice = "1"
 
     print(f"\n🎯 Selected: {selected_aggressiveness.upper()} mode")

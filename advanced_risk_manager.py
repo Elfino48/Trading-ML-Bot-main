@@ -1539,31 +1539,23 @@ class AdvancedRiskManager:
             if entry_price == 0 or original_sl == 0:
                 return 0
 
-            breakeven_pnl_trigger = 1.0
-            atr_trail_pnl_trigger = 2.0
-            atr_multiplier = 1.5
-
-            current_sl = original_sl
-            
             if side == 'BUY':
-                breakeven_sl = entry_price
-                if pnl_percent >= breakeven_pnl_trigger:
-                    current_sl = max(current_sl, breakeven_sl)
-
-                if pnl_percent >= atr_trail_pnl_trigger:
-                    atr_sl = current_price - (atr * atr_multiplier)
-                    current_sl = max(current_sl, atr_sl)
+                # Your proposed logic
+                if pnl_percent >= 1.0:
+                    # Calculate how many 0.25% steps above 1% we are
+                    steps_above_1 = (pnl_percent - 1.0) // 0.25
+                    target_profit_lock = 0.25 + (steps_above_1 * 0.25)
+                    new_sl = entry_price * (1 + target_profit_lock / 100)
+                    return max(original_sl, new_sl)  # Only move up
                     
             elif side == 'SELL':
-                breakeven_sl = entry_price
-                if pnl_percent >= breakeven_pnl_trigger:
-                    current_sl = min(current_sl, breakeven_sl)
+                if pnl_percent >= 1.0:
+                    steps_above_1 = (pnl_percent - 1.0) // 0.25
+                    target_profit_lock = 0.25 + (steps_above_1 * 0.25)
+                    new_sl = entry_price * (1 - target_profit_lock / 100)
+                    return min(original_sl, new_sl)  # Only move down for short
 
-                if pnl_percent >= atr_trail_pnl_trigger:
-                    atr_sl = current_price + (atr * atr_multiplier)
-                    current_sl = min(current_sl, atr_sl)
-
-            return current_sl
+            return original_sl  # No change
 
         except Exception as e:
             self.logger.error(f"Error in calculate_trailing_stop: {e}", exc_info=True)

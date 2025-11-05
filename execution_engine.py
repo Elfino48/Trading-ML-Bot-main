@@ -52,16 +52,11 @@ class ExecutionEngine:
         self.logger.info("In-memory trade history has been cleared.")
 
     def update_position_cache_from_rest(self, rest_positions: Dict[str, Dict]):
-        """
-        Forces the internal position cache to match a snapshot from the REST API.
-        This is the primary mechanism for correcting cache/state drift.
-        """
         self.logger.info(f"Syncing position cache with REST API snapshot ({len(rest_positions)} open positions).")
         try:
             with self._state_lock:
                 self.position_cache.clear()
                 for symbol, pos_data in rest_positions.items():
-                    # Ensure data is in the same format as WS updates (floats/ints)
                     if float(pos_data.get('size', 0)) > 0:
                         self.position_cache[symbol] = {
                             'size': float(pos_data.get('size', 0)),
@@ -70,7 +65,9 @@ class ExecutionEngine:
                             'positionValue': float(pos_data.get('positionValue', 0)),
                             'unrealisedPnl': float(pos_data.get('unrealisedPnl', 0)),
                             'liqPrice': float(pos_data.get('liqPrice', 0)),
-                            'updatedTime': int(pos_data.get('updatedTime', time.time()*1000))
+                            'updatedTime': int(pos_data.get('updatedTime', time.time()*1000)),
+                            'stopLoss': float(pos_data.get('stopLoss', 0)),
+                            'takeProfit': float(pos_data.get('takeProfit', 0))
                         }
             self.logger.info("Position cache sync complete.")
         except Exception as e:
@@ -175,6 +172,8 @@ class ExecutionEngine:
                             pnl_str = pos.get('unrealisedPnl', '0')
                             liq_price_str = pos.get('liqPrice', '')
                             updated_time_str = pos.get('updatedTime', str(int(time.time()*1000)))
+                            sl_str = pos.get('stopLoss', '0')
+                            tp_str = pos.get('takeProfit', '0')
 
                             size = float(size_str) if size_str else 0.0
                             avg_price = float(avg_price_str) if avg_price_str else 0.0
@@ -182,6 +181,8 @@ class ExecutionEngine:
                             pnl = float(pnl_str) if pnl_str else 0.0
                             liq_price = float(liq_price_str) if liq_price_str else 0.0
                             updated_time = int(updated_time_str) if updated_time_str else int(time.time()*1000)
+                            stop_loss = float(sl_str) if sl_str else 0.0
+                            take_profit = float(tp_str) if tp_str else 0.0
 
                             if symbol and size > 0:
                                 self.position_cache[symbol] = {
@@ -191,7 +192,9 @@ class ExecutionEngine:
                                     'positionValue': pos_value,
                                     'unrealisedPnl': pnl,
                                     'liqPrice': liq_price,
-                                    'updatedTime': updated_time
+                                    'updatedTime': updated_time,
+                                    'stopLoss': stop_loss,
+                                    'takeProfit': take_profit
                                 }
                                 count += 1
                         self.logger.info(f"Initialized position cache with {count} open positions.")
@@ -248,6 +251,8 @@ class ExecutionEngine:
                             pnl = float(pos_data.get('unrealisedPnl', 0))
                             liq_price = float(pos_data.get('liqPrice', 0))
                             updated_time = int(pos_data.get('updatedTime', message.get('ts', time.time()*1000)))
+                            stop_loss = float(pos_data.get('stopLoss', 0))
+                            take_profit = float(pos_data.get('takeProfit', 0))
                             
                             self.logger.debug(f"WS Position Update: {symbol} Size={size} Side={side} PNL={pnl}")
                             self.position_cache[symbol] = {
@@ -257,7 +262,9 @@ class ExecutionEngine:
                                 'positionValue': pos_value,
                                 'unrealisedPnl': pnl,
                                 'liqPrice': liq_price,
-                                'updatedTime': updated_time
+                                'updatedTime': updated_time,
+                                'stopLoss': stop_loss,
+                                'takeProfit': take_profit
                             }
 
                             if size == 0 and previous_size > 0 and self.main_bot is not None:

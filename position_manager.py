@@ -75,12 +75,11 @@ class PositionManager:
             if position_side == 'Buy':
                 pnl_percent = ((current_price - entry_price) / entry_price) * 100
             else:
-                pnl_percent = ((entry_price - current_price) / current_price) * 100
+                pnl_percent = ((entry_price - current_price) / entry_price) * 100
 
             trade_id = original_trade['id']
             trade_flags = self.database.get_trade_flags(trade_id)
 
-            # Enhanced logging
             self.logger.info(f"Managing {symbol}: Side={position_side}, Size={position.get('size', 0)}, "
                             f"PnL={pnl_percent:.2f}%, Price={current_price:.4f}")
 
@@ -90,7 +89,7 @@ class PositionManager:
             if self._manage_partial_take_profit(symbol, pnl_percent, trade_id, trade_flags):
                 return True
             
-            if self._manage_trailing_stop(symbol, position_side, original_trade, current_price, pnl_percent, market_data):
+            if self._manage_trailing_stop(symbol, position, original_trade, current_price, pnl_percent, market_data):
                 return True
 
             if self._check_signal_invalidation(symbol, position_side, market_data):
@@ -175,35 +174,76 @@ class PositionManager:
             self.logger.error(f"Error calculating ATR: {e}")
             return 0.0
 
-    def _manage_trailing_stop(self, symbol: str, position_side: str, original_trade: dict, current_price: float, pnl_percent: float, market_data: pd.DataFrame) -> bool:
+    def _manage_trailing_stop(self, symbol: str, position: dict, original_trade: dict, current_price: float, pnl_percent: float, market_data: pd.DataFrame) -> bool:
         try:
             atr = self._calculate_atr(market_data)
             if atr == 0:
                 self.logger.warning(f"ATR calculation failed for {symbol}, skipping trailing stop")
                 return False
             
-            new_sl_price = self.risk_manager.calculate_trailing_stop(
+            position_side = position.get('side', 'Buy')
+            current_sl_price = float(position.get('stopLoss', 0))
+            current_tp_price = float(position.get('takeProfit', 0))
+
+            target_sl_price = self.risk_manager.calculate_trailing_stop(
                 original_trade,
                 current_price,
                 pnl_percent,
                 atr
             )
             
-            if new_sl_price == 0:
+            if target_sl_price == 0:
                 return False
 
-            if position_side == 'Buy' and current_price < new_sl_price:
-                self.logger.info(f"TRAILING STOP: Closing {symbol} BUY. Price {current_price} hit TSL {new_sl_price}")
-                close_result = self.execution_engine.close_position(symbol, "TrailingStopLoss")
-                if close_result.get('success') and self.telegram_bot:
-                    self.telegram_bot.log_trailing_stop_close(symbol, pnl_percent, new_sl_price, "Buy")
-                return True
-            elif position_side == 'Sell' and current_price > new_sl_price:
-                self.logger.info(f"TRAILING STOP: Closing {symbol} SELL. Price {current_price} hit TSL {new_sl_price}")
-                close_result = self.execution_engine.close_position(symbol, "TrailingStopLoss")
-                if close_result.get('success') and self.telegram_bot:
-                    self.telegram_bot.log_trailing_stop_close(symbol, pnl_percent, new_sl_price, "Sell")
-                return True
+            sl_price_to_use = current_sl_price
+            needs_sl_update = False
+
+            if position_side == 'Buy':
+                if target_sl_price > current_sl_price:
+                    needs_sl_update = True
+            elif position_side == 'Sell':
+                if target_sl_price < current_sl_price and target_sl_price > 0:
+                    needs_sl_update = True
+
+            if needs_sl_update:
+                self.logger.info(f"TRAIL: Moving {symbol} {position_side} SL from {current_sl_price:.4f} to {target_sl_price:.4f}")
+                
+                tp_to_send = str(current_tp_price) if current_tp_price > 0 else None
+                
+                sl_tp_response = self.execution_engine.client.set_trading_stop(
+                    symbol=symbol,
+                    stop_loss=str(target_sl_price),
+                    take_profit=tp_to_send
+                )
+
+                if sl_tp_response and sl_tp_response.get('retCode') == 0:
+                    self.logger.info(f"TRAIL: Successfully updated SL for {symbol} on exchange.")
+                    sl_price_to_use = target_sl_price
+                    if self.telegram_bot:
+                        self.telegram_bot.log_trailing_stop_update(
+                            symbol,
+                            position_side,
+                            current_sl_price,
+                            target_sl_price,
+                            pnl_percent
+                        )
+                else:
+                    err = sl_tp_response.get('retMsg', 'Failed') if sl_tp_response else 'No Response'
+                    self.logger.warning(f"TRAIL: Failed to update SL for {symbol}: {err}")
+            
+            if sl_price_to_use > 0:
+                if position_side == 'Buy' and current_price < sl_price_to_use:
+                    self.logger.info(f"TRAILING STOP HIT: Closing {symbol} BUY. Price {current_price} hit TSL {sl_price_to_use}")
+                    close_result = self.execution_engine.close_position(symbol, "TrailingStopLoss")
+                    if close_result.get('success') and self.telegram_bot:
+                        self.telegram_bot.log_trailing_stop_close(symbol, pnl_percent, sl_price_to_use, "Buy")
+                    return True
+                elif position_side == 'Sell' and current_price > sl_price_to_use:
+                    self.logger.info(f"TRAILING STOP HIT: Closing {symbol} SELL. Price {current_price} hit TSL {sl_price_to_use}")
+                    close_result = self.execution_engine.close_position(symbol, "TrailingStopLoss")
+                    if close_result.get('success') and self.telegram_bot:
+                        self.telegram_bot.log_trailing_stop_close(symbol, pnl_percent, sl_price_to_use, "Sell")
+                    return True
             
             return False
         except Exception as e:

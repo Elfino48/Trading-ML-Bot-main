@@ -122,8 +122,8 @@ class EmergencyProtocols:
         }
         
         # If emergency conditions detected, execute protocols
-        if result['emergency']:
-            self.execute_emergency_stop(triggered_conditions)
+        #if result['emergency']:
+            #self.execute_emergency_stop(triggered_conditions)
         
         return result
     

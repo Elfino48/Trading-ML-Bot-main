@@ -666,7 +666,30 @@ class TelegramBot:
                 self.send_message(chat_id, "❌ Resume functionality not implemented in current version")
         except Exception as e:
             self.send_message(chat_id, f"❌ Error resuming bot: {e}")
-    
+
+    def log_trailing_stop_update(self, symbol: str, side: str, old_sl: float, new_sl: float, pnl_percent: float):
+        emoji = "🟢" if side == 'Buy' else "🔴"
+        pnl_emoji = "📈" if pnl_percent >= 0 else "📉"
+        
+        sl_change_msg = "Stop Loss moved UP"
+        if side == 'Sell':
+            sl_change_msg = "Stop Loss moved DOWN"
+
+        message = f"""
+🛡️ <b>TRAILING STOP UPDATED</b> {emoji}
+
+<b>Symbol:</b> {symbol}
+<b>Side:</b> {side}
+<b>Current PnL:</b> {pnl_percent:+.2f}% {pnl_emoji}
+
+{sl_change_msg}
+<b>From:</b> ${old_sl:,.4f}
+<b>To:</b> ${new_sl:,.4f}
+
+🕒 <i>{datetime.now().strftime('%H:%M:%S')}</i>
+        """
+        self.send_channel_message(message.strip())
+
     def _handle_stop(self, chat_id: str, args: List[str]):
         if not self.trading_bot:
             self.send_message(chat_id, "❌ Bot not connected")

@@ -22,6 +22,7 @@ class EnhancedStrategyOrchestrator:
         self.risk_manager = AdvancedRiskManager(bybit_client, aggressiveness)
         self.client = bybit_client 
         self.data_engine = data_engine 
+        self.ml_predictor.set_data_engine(data_engine)
         self.aggressiveness = aggressiveness
         self.technical_analyzer = EnhancedTechnicalAnalyzer()
         self.error_handler = error_handler
@@ -1267,6 +1268,8 @@ class EnhancedStrategyOrchestrator:
 
             signals = self.technical_analyzer.generate_enhanced_signals(indicators)
             ml_result = self.ml_predictor.predict(symbol, historical_data)
+            self.logger.info(f"[STRATEGY_ANALYSIS] ML result for {symbol}: {ml_result}")
+
             atr = indicators.get('atr', analysis_price * 0.02)
             mtf_signals = self._multi_timeframe_analysis(historical_data)
 
