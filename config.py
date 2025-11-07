@@ -65,9 +65,9 @@ class RiskConfig:
         "moderate": {
             "min_confidence": 25,
             "max_position_size_usdt": 700,
-            "max_daily_loss_percent": 8,
+            "max_daily_loss_percent": 20,
             "global_stop_loss_percent": 3,
-            "base_size_percent": 0.03,
+            "base_size_percent": 0.05,
             "kelly_multiplier": 0.15,
             "sl_atr_multiple": 2.5,
             "tp_atr_multiple": 3.0,

@@ -557,50 +557,193 @@ class TelegramBot:
         if not self.trading_bot:
             self.send_message(chat_id, "❌ Bot not connected")
             return
+        
         try:
-            performance = self.trading_bot.get_performance_summary()
+            # Check if user wants all-time performance
+            all_time = False
+            timeframe_msg = "7-Day"
+            if args and args[0].lower() in ['all', 'alltime', 'all-time']:
+                all_time = True
+                timeframe_msg = "All-Time"
+            
+            # Get performance data based on timeframe
+            if all_time:
+                stats = self.trading_bot.database.get_trading_statistics(days=365*10)
+                pnl_data = self.trading_bot.database.get_all_time_pnl()
+            else:
+                stats = self.trading_bot.database.get_trading_statistics(days=7)
+                pnl_data = self.trading_bot.database.get_period_pnl(days=7)
+            
+            current_portfolio = self.trading_bot.get_portfolio_value()
+            
+            # Format PnL display to ensure consistency
+            pnl_usdt = pnl_data['total_pnl_usdt']
+            pnl_percent = pnl_data['total_pnl_percent']
+            
+            # Ensure signs match
+            if (pnl_usdt < 0 and pnl_percent > 0) or (pnl_usdt > 0 and pnl_percent < 0):
+                # If signs are inconsistent, use the USD sign for percentage
+                pnl_percent = abs(pnl_percent) * (-1 if pnl_usdt < 0 else 1)
+            
             message = f"""
-📊 <b>PERFORMANCE SUMMARY</b>
+    📊 <b>PERFORMANCE SUMMARY - {timeframe_msg}</b>
 
-<b>Total Trades (Session):</b> {performance.get('total_trades', 0)}
-<b>Win Rate (Session):</b> {performance.get('win_rate', 0):.1f}%
-<b>Average Confidence (Session):</b> {performance.get('avg_confidence', 0):.1f}%
-<b>Average Risk/Reward (Session):</b> {performance.get('avg_risk_reward', 0):.1f}
-<b>Aggressiveness:</b> {performance.get('aggressiveness', 'N/A').upper()}
-"""
-            try:
-                recent_trades = self.trading_bot.execution_engine.get_trade_history(limit=5)
-                if recent_trades:
-                    message += f"\n<b>Last {len(recent_trades)} Trades (Session):</b>\n"
-                    for trade in recent_trades[-5:]:
-                        success_emoji = "✅" if trade.get('success', False) else "❌"
-                        action_emoji = "🟢" if trade.get('side') == 'Buy' else "🔴"
-                        pnl = trade.get('pnl_percent', None)
-                        if pnl is not None:
-                             message += f"{success_emoji}{action_emoji} {trade.get('symbol', 'N/A')} - PnL: {pnl:.2f}%\n"
-                        else:
-                             message += f"{success_emoji}{action_emoji} {trade.get('symbol', 'N/A')} - Size: ${trade.get('position_size_usdt', 0):.2f}\n"
+    <b>Portfolio Value:</b> ${current_portfolio:,.2f}
+    💰 <b>Total PnL ({timeframe_msg}):</b> ${pnl_usdt:+.2f} ({pnl_percent:+.2f}%)
 
-            except:
-                pass
-                
-            db_stats = performance.get('recent_stats', {})
-            if db_stats and 'total_trades' in db_stats:
-                stats = db_stats
-                message += f"\n<b>7-Day DB Performance:</b>\n"
-                message += f"• Trades: {stats.get('total_trades', 0)}\n"
-                message += f"• Win Rate: {stats.get('win_rate', 0):.1f}%\n"
-                message += f"• Avg PnL: {stats.get('avg_pnl_percent', 0):.2f}%\n"
-                symbol_perf = stats.get('symbol_performance', [])
-                if symbol_perf:
-                    best_symbol = max(symbol_perf, key=lambda x: x.get('avg_pnl_percent', 0), default=None)
-                    if best_symbol:
-                        message += f"• Best Symbol: {best_symbol.get('symbol')} ({best_symbol.get('avg_pnl_percent', 0):.2f}%)\n"
+    <b>Trading Statistics ({timeframe_msg}):</b>
+    🔄 <b>Total Trades:</b> {stats.get('total_trades', 0)}
+    🎯 <b>Win Rate:</b> {stats.get('win_rate', 0):.1f}%
+    📈 <b>Average PnL per Trade:</b> {stats.get('avg_pnl_percent', 0):.2f}%
+    ✅ <b>Winning Trades:</b> {stats.get('winning_trades', 0)}
+    ❌ <b>Losing Trades:</b> {stats.get('losing_trades', 0)}
+    """
+
+            # Format best/worst trades with USD values
+            if stats.get('best_trade'):
+                best_pnl = stats['best_trade'].get('pnl_percent', 0)
+                best_pnl_usdt = stats['best_trade'].get('pnl_usdt', 0)
+                best_symbol = stats['best_trade'].get('symbol', 'N/A')
+                message += f"\n🏆 <b>Best Trade:</b> {best_symbol} -> {best_pnl:+.2f}% (${best_pnl_usdt:+.2f})"
+            
+            if stats.get('worst_trade'):
+                worst_pnl = stats['worst_trade'].get('pnl_percent', 0)
+                worst_pnl_usdt = stats['worst_trade'].get('pnl_usdt', 0)
+                worst_symbol = stats['worst_trade'].get('symbol', 'N/A')
+                message += f"\n💩 <b>Worst Trade:</b> {worst_symbol} -> {worst_pnl:+.2f}% (${worst_pnl_usdt:+.2f})"
+
+            # Add session performance if available
+            if hasattr(self.trading_bot, 'session_trades') and self.trading_bot.session_trades:
+                session_trades = [t for t in self.trading_bot.session_trades if t.get('pnl_percent') is not None]
+                if session_trades:
+                    session_winning = len([t for t in session_trades if t.get('pnl_percent', 0) > 0])
+                    session_total = len(session_trades)
+                    session_win_rate = (session_winning / session_total * 100) if session_total > 0 else 0
+                    session_pnl = sum(t.get('pnl_usdt', 0) for t in session_trades)
+                    message += f"\n\n<b>Session Performance:</b>"
+                    message += f"\n• Trades: {session_total}"
+                    message += f"\n• Win Rate: {session_win_rate:.1f}%"
+                    message += f"\n• PnL: ${session_pnl:+.2f}"
+                    message += f"\n• Wins: {session_winning} | Losses: {session_total - session_winning}"
+
+            # Add appropriate footer
+            if all_time:
+                message += f"\n\n💡 <i>Use '/performance' for 7-day stats</i>"
+            else:
+                message += f"\n\n💡 <i>Use '/performance all' for all-time stats</i>"
+            
             message += f"\n⏰ <i>{datetime.now().strftime('%H:%M:%S')}</i>"
+            
             self.send_message(chat_id, message.strip())
+            
+            # Generate and send performance chart only for 7-day performance
+            if not all_time:
+                self._send_performance_chart(chat_id)
+            
         except Exception as e:
             self.send_message(chat_id, f"❌ Error getting performance: {e}")
-    
+
+    def _send_photo(self, chat_id: str, photo_buffer, caption: str = ""):
+        """Send photo to Telegram chat"""
+        try:
+            url = f"{self.base_url}/sendPhoto"
+            
+            files = {
+                'photo': ('performance_chart.png', photo_buffer, 'image/png')
+            }
+            
+            data = {
+                'chat_id': chat_id,
+                'caption': caption,
+                'parse_mode': 'HTML'
+            }
+            
+            response = requests.post(url, files=files, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                return True
+            else:
+                print(f"Error sending photo: {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"Error sending photo: {e}")
+            return False
+
+    def _send_performance_chart(self, chat_id: str):
+        """Generate and send 7-day portfolio value chart in USD - FIXED VERSION"""
+        try:
+            # Set the backend to Agg (non-interactive) before importing pyplot
+            import matplotlib
+            matplotlib.use('Agg')  # Use non-interactive backend
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            from io import BytesIO
+            
+            # Get performance history for 7 days
+            perf_df = self.trading_bot.database.get_performance_history(days=7)
+            
+            if perf_df.empty:
+                self.send_message(chat_id, "📊 No performance data available for chart.")
+                return
+            
+            # Convert timestamp to datetime and sort
+            perf_df['timestamp'] = pd.to_datetime(perf_df['timestamp'])
+            perf_df = perf_df.sort_values('timestamp')
+            
+            # Create the chart - Portfolio Value in USD
+            plt.figure(figsize=(10, 5))  # Smaller size for Telegram
+            
+            # Plot portfolio value
+            if 'portfolio_value' in perf_df.columns:
+                plt.plot(perf_df['timestamp'], perf_df['portfolio_value'], 
+                        linewidth=2, marker='o', markersize=3, color='#00D4AA',
+                        label='Portfolio Value')
+                
+                # Fill under the line
+                plt.fill_between(perf_df['timestamp'], perf_df['portfolio_value'], 
+                            alpha=0.3, color='#00D4AA')
+            
+            # Chart styling
+            plt.title('7-Day Portfolio Value', fontsize=12, fontweight='bold', pad=10)
+            plt.ylabel('Portfolio Value (USD)', fontweight='bold', fontsize=10)
+            plt.xlabel('Date', fontweight='bold', fontsize=10)
+            plt.grid(True, alpha=0.3)
+            
+            # Format y-axis as currency
+            plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+            
+            # Format x-axis to show dates
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+            plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=1))
+            
+            plt.xticks(rotation=45, fontsize=8)
+            plt.yticks(fontsize=8)
+            plt.tight_layout()
+            
+            # Save to bytes buffer
+            buffer = BytesIO()
+            plt.savefig(buffer, format='png', dpi=80, bbox_inches='tight', 
+                    facecolor='white', edgecolor='none')
+            buffer.seek(0)
+            
+            # Explicitly close the figure to free memory
+            plt.close('all')
+            
+            # Send the image
+            success = self._send_photo(chat_id, buffer, "7-Day Portfolio Value")
+            
+            # Close buffer
+            buffer.close()
+            
+            if not success:
+                self.send_message(chat_id, "❌ Failed to send chart")
+                
+        except ImportError:
+            self.send_message(chat_id, "📊 Chart generation requires matplotlib. Install with: pip install matplotlib")
+        except Exception as e:
+            self.send_message(chat_id, f"❌ Error generating chart: {str(e)}")
+
     def _handle_aggressiveness(self, chat_id: str, args: List[str]):
         if not self.trading_bot:
             self.send_message(chat_id, "❌ Bot not connected")
@@ -786,43 +929,41 @@ class TelegramBot:
     
     def _handle_help(self, chat_id: str, args: List[str]):
         message = """
-🤖 <b>Advanced Trading Bot - Command Help</b>
+    🤖 <b>Advanced Trading Bot - Command Help</b>
 
-<b>Basic Commands:</b>
-/status - Bot status and current cycle
-/portfolio - Portfolio value and P&L  
-/performance - Trading performance metrics
-/aggressiveness [level] - Change trading aggressiveness
-/trades - Recent trade history
-/symbols - List of trading symbols
-/risk - Current risk metrics
+    <b>Performance Commands:</b>
+    /performance - 7-day performance with portfolio value chart
+    /performance all - All-time performance (no chart)
 
-<b>Control Commands:</b>
-/pause - Pause trading temporarily
-/resume - Resume trading
-/stop - Stop the bot completely (with confirmation)
+    <b>Basic Commands:</b>
+    /status - Bot status and current cycle
+    /portfolio - Portfolio value and P&L  
+    /aggressiveness [level] - Change trading aggressiveness
+    /trades - Recent trade history
+    /symbols - List of trading symbols
+    /risk - Current risk metrics
 
-<b>Enhanced Monitoring:</b>
-/errors - Show current error status
-/emergency - Emergency protocols status  
-/metrics - Advanced performance metrics
-/reset_errors - Reset error handler
-/database - Database statistics
-/forceretrain [confirm] - Force retraining of all ML models (intensive)
+    <b>Control Commands:</b>
+    /pause - Pause trading temporarily
+    /resume - Resume trading
+    /stop - Stop the bot completely (with confirmation)
 
-<b>Aggressiveness Levels:</b>
-• conservative - Safe, fewer trades (min confidence: 35%)
-• moderate - Balanced (min confidence: 25%) 
-• aggressive - Higher frequency (min confidence: 20%)
-• high - Maximum risk (min confidence: 15%)
+    <b>Enhanced Monitoring:</b>
+    /errors - Show current error status
+    /emergency - Emergency protocols status  
+    /metrics - Advanced performance metrics
+    /reset_errors - Reset error handler
+    /database - Database statistics
+    /forceretrain [confirm] - Force retraining of all ML models (intensive)
+    /close [SYMBOL] - Manually market-close an open position
 
-<b>Risk Management:</b>
-• Circuit breaker activates after 3 consecutive losses
-• Maximum daily loss: 5-15% (based on aggressiveness)
-• Position sizing uses Kelly Criterion
-• Portfolio correlation limits enforced
+    <b>Aggressiveness Levels:</b>
+    • conservative - Safe, fewer trades (min confidence: 35%)
+    • moderate - Balanced (min confidence: 25%) 
+    • aggressive - Higher frequency (min confidence: 20%)
+    • high - Maximum risk (min confidence: 15%)
 
-💡 <i>All commands require authorization. Use /start for quick overview.</i>
+    💡 <i>All commands require authorization. Use /start for quick overview.</i>
         """
         self.send_message(chat_id, message.strip())
     

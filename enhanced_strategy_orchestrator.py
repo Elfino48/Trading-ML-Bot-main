@@ -56,6 +56,139 @@ class EnhancedStrategyOrchestrator:
         print(f"🎯 Strategy Orchestrator set to: {self.aggressiveness.upper()} mode")
         print(f"🔗 Crypto-specific indicators: ENABLED")
     
+    def _log_cycle_details(self, decision: Dict):
+        try:
+            log_entry = []
+            log_entry.append(f"============================================================")
+            log_entry.append(f"CYCLE DECISION LOG: {decision['symbol']}")
+            log_entry.append(f"Timestamp: {decision.get('timestamp')}")
+            log_entry.append(f"Aggressiveness: {decision.get('aggressiveness', 'N/A')}")
+            
+            # NEW: Crypto-specific logging
+            if self._is_crypto_symbol(decision['symbol']):
+                crypto_regime = decision.get('technical_indicators', {}).get('crypto_regime', 'N/A')
+                on_chain = decision.get('technical_indicators', {}).get('on_chain_strength', 'N/A')
+                fear_greed = decision.get('technical_indicators', {}).get('fear_greed_index', 'N/A')
+                log_entry.append(f"Crypto Regime: {crypto_regime} | On-Chain: {on_chain} | F&G: {fear_greed}")
+            
+            log_entry.append(f"------------------------------------------------------------")
+            log_entry.append(f"[DECISION]")
+            log_entry.append(f"Action: {decision.get('action', 'N/A')}")
+            log_entry.append(f"Final Confidence: {decision.get('confidence', 0):.2f}%")
+            log_entry.append(f"Composite Score: {decision.get('composite_score', 0):.4f}")
+            log_entry.append(f"Trade Quality: {decision.get('trade_quality', {}).get('quality_rating', 'N/A')} ({decision.get('trade_quality', {}).get('quality_score', 0)})")
+
+            # --- ENHANCED: Log execution check with veto reasons ---
+            should_execute = decision.get('should_execute', False)
+            execute_reason = decision.get('execute_reason', 'N/A')
+            log_entry.append(f"\n[EXECUTION CHECK]")
+            log_entry.append(f"  - Should Execute: {should_execute}")
+            if not should_execute:
+                log_entry.append(f"  - Reason: {execute_reason}")
+                # NEW: Show all veto reasons in detail
+                veto_reasons = decision.get('veto_reasons', [])
+                if veto_reasons:
+                    log_entry.append(f"  - Veto Reasons:")
+                    for reason in veto_reasons:
+                        log_entry.append(f"    • {reason}")
+
+            log_entry.append(f"\n[SCORE BREAKDOWN]")
+            log_entry.append(f"  - Trend Score:      {decision.get('trend_score', 0):.4f}")
+            log_entry.append(f"  - Mean Rev Score:   {decision.get('mr_score', 0):.4f}")
+            log_entry.append(f"  - Breakout Score:   {decision.get('breakout_score', 0):.4f}")
+            log_entry.append(f"  - MTF Score:        {decision.get('mtf_score', 0):.4f}")
+            log_entry.append(f"  - ML Score:         {decision.get('ml_score', 0):.4f}")
+
+            ml_pred = decision.get('ml_prediction', {})
+            log_entry.append(f"\n[ML PREDICTOR DETAILS]")
+            log_entry.append(f"  - ML Raw Prediction: {ml_pred.get('raw_prediction', 0)} (This is scaled to ML Score)")
+            log_entry.append(f"  - ML Model Confidence: {ml_pred.get('confidence', 0) * 100:.2f}% (This boosts Final Confidence)")
+            log_entry.append(f"  - ML (RF) Pred: {ml_pred.get('rf_pred', 'N/A')} | Conf: {ml_pred.get('rf_confidence', 0) * 100:.2f}%")
+            log_entry.append(f"  - ML (GB) Pred: {ml_pred.get('gb_pred', 'N/A')} | Conf: {ml_pred.get('gb_confidence', 0) * 100:.2f}%")
+
+            # --- NEW SECTION FOR TRADE QUALITY DETAILS ---
+            trade_quality = decision.get('trade_quality', {})
+            if trade_quality:
+                log_entry.append(f"\n[TRADE QUALITY DETAILS]")
+                strengths = trade_quality.get('strengths', [])
+                weaknesses = trade_quality.get('weaknesses', [])
+                
+                if strengths:
+                    log_entry.append(f"  - Strengths:")
+                    for strength in strengths:
+                        log_entry.append(f"    • {strength}")
+                
+                if weaknesses:
+                    log_entry.append(f"  - Weaknesses:")
+                    for weakness in weaknesses:
+                        log_entry.append(f"    • {weakness}")
+                
+                active_filters = trade_quality.get('active_filters', [])
+                if active_filters:
+                    log_entry.append(f"  - Active Filters: {', '.join(active_filters)}")
+                
+                execution_confidence = trade_quality.get('execution_confidence', 0)
+                log_entry.append(f"  - Execution Confidence: {execution_confidence:.2f}")
+
+            # --- SECTION FOR RAW INDICATORS ---
+            indicators = decision.get('technical_indicators', {})
+            if indicators:
+                log_entry.append(f"\n[TECHNICAL INDICATORS (Raw Values)]")
+                # Sort indicators alphabetically for consistent logging
+                sorted_indicators = sorted(indicators.items())
+                for key, value in sorted_indicators:
+                    # Format floats nicely, leave others as is
+                    if isinstance(value, (float, np.float64)):
+                        log_entry.append(f"  - {key:<25}: {value:.4f}")
+                    else:
+                        log_entry.append(f"  - {key:<25}: {value}")
+
+            # NEW: Crypto indicators section
+            indicators = decision.get('technical_indicators', {})
+            crypto_indicators_present = any('crypto' in key.lower() or 
+                                          'on_chain' in key.lower() or
+                                          'fear_greed' in key.lower() 
+                                          for key in indicators.keys())
+            
+            if crypto_indicators_present:
+                log_entry.append(f"\n[CRYPTO-SPECIFIC INDICATORS]")
+                crypto_keys = [k for k in indicators.keys() if any(term in k.lower() for term in 
+                                ['crypto', 'on_chain', 'fear_greed', 'halving', 'miner', 'exchange', 'nvt', 'mvrv'])]
+                for key in sorted(crypto_keys):
+                    value = indicators[key]
+                    if isinstance(value, (float, np.float64)):
+                        log_entry.append(f"  - {key:<25}: {value:.4f}")
+                    else:
+                        log_entry.append(f"  - {key:<25}: {value}")
+
+            log_entry.append(f"\n[CONTEXT & RISK]")
+            log_entry.append(f"Market Regime: {decision.get('market_regime', 'N/A')}")
+            log_entry.append(f"Volatility Regime: {decision.get('volatility_regime', 'N/A')}")
+            log_entry.append(f"Analysis Price (Kline Close): {decision.get('analysis_price', 0):.4f}")
+            log_entry.append(f"Latest Price (For Execution): {decision.get('current_price', 0):.4f}")
+            log_entry.append(f"Proposed Size: ${decision.get('position_size', 0):.2f}")
+            log_entry.append(f"Stop Loss: ${decision.get('stop_loss', 0):.4f}")
+            log_entry.append(f"Take Profit: ${decision.get('take_profit', 0):.4f}")
+
+            if decision.get('analysis_error'): # Use .get() for safety
+                log_entry.append(f"\n[ANALYSIS ERROR]")
+                log_entry.append(f"Error: {decision['analysis_error']}")
+
+            log_entry.append(f"============================================================\n")
+
+            self.cycle_logger.info("\n".join(log_entry))
+
+        except Exception as e:
+            # Use logger if available, otherwise print
+            log_func = getattr(self, 'cycle_logger', None)
+            if log_func and hasattr(log_func, 'error'):
+                log_func.error(f"--- FAILED TO LOG CYCLE DETAILS --- \n{str(e)}\n")
+            else:
+                print(f"❌ Error in _log_cycle_details (logging failed): {e}")
+
+            # Also print to console as a fallback
+            print(f"❌ Error in _log_cycle_details: {e}")
+
     def _setup_cycle_logger(self):
         """Sets up a logger for cycle details, creating a new file for each run."""
         try:
@@ -103,111 +236,6 @@ class EnhancedStrategyOrchestrator:
                     self.cycle_logger.addHandler(logging.StreamHandler())
             self.cycle_logger.setLevel(logging.WARNING) # Log only warnings/errors if file fails
             self.cycle_logger.warning("File logging for cycle details failed. Using console fallback.")
-
-    def _log_cycle_details(self, decision: Dict):
-        try:
-            log_entry = []
-            log_entry.append(f"============================================================")
-            log_entry.append(f"CYCLE DECISION LOG: {decision['symbol']}")
-            log_entry.append(f"Timestamp: {decision.get('timestamp')}")
-            log_entry.append(f"Aggressiveness: {decision.get('aggressiveness', 'N/A')}")
-            
-            # NEW: Crypto-specific logging
-            if self._is_crypto_symbol(decision['symbol']):
-                crypto_regime = decision.get('technical_indicators', {}).get('crypto_regime', 'N/A')
-                on_chain = decision.get('technical_indicators', {}).get('on_chain_strength', 'N/A')
-                fear_greed = decision.get('technical_indicators', {}).get('fear_greed_index', 'N/A')
-                log_entry.append(f"Crypto Regime: {crypto_regime} | On-Chain: {on_chain} | F&G: {fear_greed}")
-            
-            log_entry.append(f"------------------------------------------------------------")
-            log_entry.append(f"[DECISION]")
-            log_entry.append(f"Action: {decision.get('action', 'N/A')}")
-            log_entry.append(f"Final Confidence: {decision.get('confidence', 0):.2f}%")
-            log_entry.append(f"Composite Score: {decision.get('composite_score', 0):.4f}")
-            log_entry.append(f"Trade Quality: {decision.get('trade_quality', {}).get('quality_rating', 'N/A')} ({decision.get('trade_quality', {}).get('quality_score', 0)})")
-
-            # --- NEW: Log execution check ---
-            should_execute = decision.get('should_execute', False)
-            execute_reason = decision.get('execute_reason', 'N/A')
-            log_entry.append(f"\n[EXECUTION CHECK]")
-            log_entry.append(f"  - Should Execute: {should_execute}")
-            if not should_execute:
-                log_entry.append(f"  - Reason: {execute_reason}")
-            # --- END NEW ---
-
-            log_entry.append(f"\n[SCORE BREAKDOWN]")
-            log_entry.append(f"  - Trend Score:      {decision.get('trend_score', 0):.4f}")
-            log_entry.append(f"  - Mean Rev Score:   {decision.get('mr_score', 0):.4f}")
-            log_entry.append(f"  - Breakout Score:   {decision.get('breakout_score', 0):.4f}")
-            log_entry.append(f"  - MTF Score:        {decision.get('mtf_score', 0):.4f}")
-            log_entry.append(f"  - ML Score:         {decision.get('ml_score', 0):.4f}")
-
-            ml_pred = decision.get('ml_prediction', {})
-            log_entry.append(f"\n[ML PREDICTOR DETAILS]")
-            log_entry.append(f"  - ML Raw Prediction: {ml_pred.get('raw_prediction', 0)} (This is scaled to ML Score)")
-            log_entry.append(f"  - ML Model Confidence: {ml_pred.get('confidence', 0) * 100:.2f}% (This boosts Final Confidence)")
-            log_entry.append(f"  - ML (RF) Pred: {ml_pred.get('rf_pred', 'N/A')} | Conf: {ml_pred.get('rf_confidence', 0) * 100:.2f}%")
-            log_entry.append(f"  - ML (GB) Pred: {ml_pred.get('gb_pred', 'N/A')} | Conf: {ml_pred.get('gb_confidence', 0) * 100:.2f}%")
-
-            # --- NEW SECTION FOR RAW INDICATORS ---
-            indicators = decision.get('technical_indicators', {})
-            if indicators:
-                log_entry.append(f"\n[TECHNICAL INDICATORS (Raw Values)]")
-                # Sort indicators alphabetically for consistent logging
-                sorted_indicators = sorted(indicators.items())
-                for key, value in sorted_indicators:
-                    # Format floats nicely, leave others as is
-                    if isinstance(value, (float, np.float64)):
-                        log_entry.append(f"  - {key:<25}: {value:.4f}")
-                    else:
-                        log_entry.append(f"  - {key:<25}: {value}")
-            # --- END NEW SECTION ---
-
-            # NEW: Crypto indicators section
-            indicators = decision.get('technical_indicators', {})
-            crypto_indicators_present = any('crypto' in key.lower() or 
-                                          'on_chain' in key.lower() or
-                                          'fear_greed' in key.lower() 
-                                          for key in indicators.keys())
-            
-            if crypto_indicators_present:
-                log_entry.append(f"\n[CRYPTO-SPECIFIC INDICATORS]")
-                crypto_keys = [k for k in indicators.keys() if any(term in k.lower() for term in 
-                                ['crypto', 'on_chain', 'fear_greed', 'halving', 'miner', 'exchange', 'nvt', 'mvrv'])]
-                for key in sorted(crypto_keys):
-                    value = indicators[key]
-                    if isinstance(value, (float, np.float64)):
-                        log_entry.append(f"  - {key:<25}: {value:.4f}")
-                    else:
-                        log_entry.append(f"  - {key:<25}: {value}")
-
-            log_entry.append(f"\n[CONTEXT & RISK]")
-            log_entry.append(f"Market Regime: {decision.get('market_regime', 'N/A')}")
-            log_entry.append(f"Volatility Regime: {decision.get('volatility_regime', 'N/A')}")
-            log_entry.append(f"Analysis Price (Kline Close): {decision.get('analysis_price', 0):.4f}")
-            log_entry.append(f"Latest Price (For Execution): {decision.get('current_price', 0):.4f}")
-            log_entry.append(f"Proposed Size: ${decision.get('position_size', 0):.2f}")
-            log_entry.append(f"Stop Loss: ${decision.get('stop_loss', 0):.4f}")
-            log_entry.append(f"Take Profit: ${decision.get('take_profit', 0):.4f}")
-
-            if decision.get('analysis_error'): # Use .get() for safety
-                log_entry.append(f"\n[ANALYSIS ERROR]")
-                log_entry.append(f"Error: {decision['analysis_error']}")
-
-            log_entry.append(f"============================================================\n")
-
-            self.cycle_logger.info("\n".join(log_entry))
-
-        except Exception as e:
-            # Use logger if available, otherwise print
-            log_func = getattr(self, 'cycle_logger', None)
-            if log_func and hasattr(log_func, 'error'):
-                log_func.error(f"--- FAILED TO LOG CYCLE DETAILS --- \n{str(e)}\n")
-            else:
-                print(f"❌ Error in _log_cycle_details (logging failed): {e}")
-
-            # Also print to console as a fallback
-            print(f"❌ Error in _log_cycle_details: {e}")
 
     def set_error_handler(self, error_handler):
         self.error_handler = error_handler
@@ -1186,7 +1214,6 @@ class EnhancedStrategyOrchestrator:
             aggressiveness = self.aggressiveness
 
         # Define the base structure for fallback *before* the main try block
-        # This helps ensure all keys exist, even if values are defaults
         base_fallback = {
             'symbol': symbol,
             'current_price': 0.0, # Will be updated later
@@ -1200,23 +1227,27 @@ class EnhancedStrategyOrchestrator:
             'market_context': {}, 'timestamp': pd.Timestamp.now(),
             'technical_indicators': {},
             'analysis_error': None,
-            'analysis_price': 0.0 # Will be updated
+            'analysis_price': 0.0, # Will be updated
+            'should_execute': False, # Default to False
+            'execute_reason': 'Analysis not completed',
+            'veto_reasons': []  # NEW: Track all veto reasons
         }
 
         quality_report = self._check_data_quality(symbol, historical_data)
         if not quality_report['is_usable']:
             self.logger.error(f"Data quality issues for {symbol}: {quality_report['data_issues']}")
-            error_fallback = base_fallback.copy() # Start with base structure
+            error_fallback = base_fallback.copy()
             error_fallback['analysis_error'] = f"Data quality: {quality_report['data_issues']}"
             error_fallback['timestamp'] = pd.Timestamp.now()
-            # Try to get current price for logging context
-            try: error_fallback['current_price'] = self.data_engine.get_current_price(symbol)
-            except: pass
+            try: 
+                error_fallback['current_price'] = self.data_engine.get_current_price(symbol)
+            except: 
+                pass
             self._log_cycle_details(error_fallback)
             return error_fallback
 
-        indicators = {} # Define indicators dict outside try block for scope in except/finally
-        analysis_price = 0.0 # Define analysis_price outside try block
+        indicators = {}
+        analysis_price = 0.0
 
         try:
             if historical_data is None or historical_data.empty:
@@ -1256,16 +1287,6 @@ class EnhancedStrategyOrchestrator:
             indicators['analysis_price'] = analysis_price
             indicators['close'] = analysis_price
 
-            # ========== VOLUME FILTER MODIFICATION START ==========
-            # Check volume but don't return early - just note the warning
-            volume_ok, volume_reason = self._should_trade_with_volume(indicators)
-            volume_warning = None
-            if not volume_ok:
-                self.logger.warning(f"[{symbol}] Volume warning: {volume_reason}")
-                volume_warning = volume_reason
-                # We continue with analysis but will block execution later
-            # ========== VOLUME FILTER MODIFICATION END ==========
-
             signals = self.technical_analyzer.generate_enhanced_signals(indicators)
             ml_result = self.ml_predictor.predict(symbol, historical_data)
             self.logger.info(f"[STRATEGY_ANALYSIS] ML result for {symbol}: {ml_result}")
@@ -1289,6 +1310,11 @@ class EnhancedStrategyOrchestrator:
                 composite_score, indicators, ml_result, aggressiveness
             )
 
+            # SINGLE VOLUME CHECK - Pre-compute volume results
+            volume_ok, volume_reason = self._should_trade_with_volume(indicators, action)
+            if not volume_ok:
+                self.logger.warning(f"[{symbol}] Volume warning: {volume_reason}")
+
             confidence = confidence * confidence_reduction
 
             latest_price = self.data_engine.get_current_price(symbol)
@@ -1302,6 +1328,12 @@ class EnhancedStrategyOrchestrator:
                 symbol, confidence, latest_price, atr, portfolio_value, aggressiveness
             )
 
+            # ENHANCED: Volatility-adjusted position sizing (Feedback #2)
+            original_size = position_info['size_usdt']
+            volatility_adjusted_size = self._calculate_volatility_adjusted_size(original_size, indicators)
+            position_info['size_usdt'] = volatility_adjusted_size
+            position_info['quantity'] = volatility_adjusted_size / latest_price
+
             volatility_regime = 'high' if indicators.get('atr_percent', 0) > 3 else 'low' if indicators.get('atr_percent', 0) < 1 else 'normal'
 
             sl_tp_levels = {}
@@ -1313,8 +1345,14 @@ class EnhancedStrategyOrchestrator:
                 sl_tp_levels = {'stop_loss': 0, 'take_profit': 0, 'risk_reward_ratio': 0}
 
             market_context = self._analyze_market_context(indicators, historical_data)
-            trade_quality = self._assess_signal_quality_enhanced(indicators, signals, ml_result, action, composite_score)
+            
+            # PASS PRE-COMPUTED VOLUME RESULTS to avoid duplicate checks
+            trade_quality = self._assess_signal_quality_enhanced(
+                indicators, signals, ml_result, action, composite_score,
+                volume_ok, volume_reason  # Pass pre-computed results
+            )
 
+            # Create decision dictionary FIRST with default execution values
             decision = {
                 'symbol': symbol,
                 'current_price': latest_price,
@@ -1345,29 +1383,65 @@ class EnhancedStrategyOrchestrator:
                     'aligned': alignment_ok,
                     'direction': alignment_direction,
                     'strength': alignment_strength
-                }
+                },
+                'should_execute': True,  # Default to True, filters will set to False if needed
+                'execute_reason': 'All conditions met',  # Default reason
+                'veto_reasons': []  # NEW: Track all veto reasons
             }
 
-            decision = self._apply_regime_aware_filters(decision, indicators)
+            # NOW apply all validation filters in SEQUENTIAL order
+            if action != 'HOLD':
+                # Volume filter - FIRST check
+                if not volume_ok:
+                    decision['should_execute'] = False
+                    decision['veto_reasons'].append(f"Volume: {volume_reason}")
+                    # Still keep the original action for logging purposes
+                    decision['execute_reason'] = f"Vetoed: {', '.join(decision['veto_reasons'])}"
+                
+                # Momentum alignment filter (only check if not already vetoed)
+                if decision['should_execute']:
+                    momentum_ok, momentum_reason = self._check_momentum_alignment(decision['action'], indicators)
+                    if not momentum_ok:
+                        decision['should_execute'] = False
+                        decision['veto_reasons'].append(f"Momentum: {momentum_reason}")
+                        decision['execute_reason'] = f"Vetoed: {', '.join(decision['veto_reasons'])}"
 
-            # ========== VOLUME FILTER EXECUTION BLOCK START ==========
-            # Apply volume filter to block execution while still showing the analysis
-            if volume_warning and decision['action'] != 'HOLD':
-                original_action = decision['action']
-                decision['action'] = 'HOLD'
-                decision['execute_reason'] = f"Volume filter: {volume_warning} (would have been {original_action})"
-                decision['should_execute'] = False
-                # Reduce confidence for low volume scenarios
-                decision['confidence'] = decision['confidence'] * 0.3
-                if 'weaknesses' not in decision['trade_quality']:
-                    decision['trade_quality']['weaknesses'] = []
-                decision['trade_quality']['weaknesses'].append(f"Low volume: {volume_warning}")
-            else:
-                # Normal execution logic for volume-ok scenarios
+                # RSI alignment filter (only check if not already vetoed)
+                if decision['should_execute']:
+                    rsi_ok, rsi_reason = self._check_rsi_alignment(decision['action'], indicators)
+                    if not rsi_ok:
+                        decision['should_execute'] = False
+                        decision['veto_reasons'].append(f"RSI: {rsi_reason}")
+                        decision['execute_reason'] = f"Vetoed: {', '.join(decision['veto_reasons'])}"
+
+                # Trend alignment filter (only check if not already vetoed)
+                if decision['should_execute']:
+                    trend_ok, trend_reason = self._check_trend_momentum_alignment(decision['action'], indicators)
+                    if not trend_ok:
+                        decision['should_execute'] = False
+                        decision['veto_reasons'].append(f"Trend: {trend_reason}")
+                        decision['execute_reason'] = f"Vetoed: {', '.join(decision['veto_reasons'])}"
+
+            # Final execution check (only if all other filters passed and action is not HOLD)
+            if decision['should_execute'] and action != 'HOLD':
                 should_execute, execute_reason = self._should_execute_trade(decision, symbol)
                 decision['should_execute'] = should_execute
-                decision['execute_reason'] = execute_reason
-            # ========== VOLUME FILTER EXECUTION BLOCK END ==========
+                if not should_execute:
+                    decision['veto_reasons'].append(f"Execution: {execute_reason}")
+                    decision['execute_reason'] = f"Vetoed: {', '.join(decision['veto_reasons'])}"
+                else:
+                    decision['execute_reason'] = 'All conditions met - Execution approved'
+
+            # If action is HOLD, we should not execute
+            if action == 'HOLD':
+                decision['should_execute'] = False
+                decision['execute_reason'] = 'HOLD action - No execution'
+                if 'veto_reasons' not in decision:
+                    decision['veto_reasons'] = []
+                decision['veto_reasons'].append('HOLD action')
+
+            # Apply regime-aware filters (these adjust confidence but don't veto execution)
+            decision = self._apply_regime_aware_filters(decision, indicators)
 
             self._log_cycle_details(decision)
 
@@ -1388,12 +1462,13 @@ class EnhancedStrategyOrchestrator:
             # Use the base fallback structure and populate known values
             error_fallback = base_fallback.copy()
             error_fallback['analysis_error'] = str(e)
-            error_fallback['technical_indicators'] = indicators # Include indicators if calculated before error
+            error_fallback['technical_indicators'] = indicators
             error_fallback['timestamp'] = pd.Timestamp.now()
-            # Try to get current price for logging context
-            try: error_fallback['current_price'] = self.data_engine.get_current_price(symbol)
-            except: pass
-            error_fallback['analysis_price'] = analysis_price if analysis_price > 0 else 0.0 # Use calculated analysis_price if valid
+            try: 
+                error_fallback['current_price'] = self.data_engine.get_current_price(symbol)
+            except: 
+                pass
+            error_fallback['analysis_price'] = analysis_price if analysis_price > 0 else 0.0
 
             self._log_cycle_details(error_fallback)
 
@@ -1694,33 +1769,52 @@ class EnhancedStrategyOrchestrator:
         drawdown = (cumulative - running_max) / running_max
         return drawdown.min() * 100  # Return as percentage
 
-    # ENHANCED: Update volume filter with crypto-specific considerations
-    def _should_trade_with_volume(self, indicators: Dict) -> Tuple[bool, str]:
-        """Enhanced volume filter with crypto-specific adjustments"""
+    def _should_trade_with_volume(self, indicators: Dict, action: str = 'HOLD') -> Tuple[bool, str]:
+        """Enhanced volume filter with OBV confirmation and crypto-specific adjustments"""
         try:
             # Base volume checks
             volume_ratio = indicators.get('volume_ratio', 1)
+            volume_sma_20 = indicators.get('volume_sma_20', 0)
+            current_volume = indicators.get('volume', 0)
+            obv_trend = indicators.get('obv_trend', 0)
             market_regime = indicators.get('market_regime', 'neutral')
+            
+            # MINIMUM VOLUME REQUIREMENTS (Feedback #1 & #2)
+            MIN_VOLUME_RATIO = 0.8
+            MIN_OBV_CONFIRMATION = True
+            
+            # Calculate percentage for absolute volume
+            volume_percentage = (current_volume / volume_sma_20) * 100 if volume_sma_20 > 0 else 0
+            
+            # Check volume ratio threshold
+            if volume_ratio < MIN_VOLUME_RATIO:
+                return False, f"Insufficient volume ratio: {volume_ratio:.3f} < {MIN_VOLUME_RATIO} (needs {MIN_VOLUME_RATIO-volume_ratio:.3f} more)"
+            
+            # Check absolute volume against SMA
+            if current_volume < volume_sma_20 * 0.8:
+                return False, f"Low absolute volume: {current_volume:.0f} ({volume_percentage:.1f}% of 20-period SMA, needs 80%)"
+            
+            # OBV confirmation requirement (Feedback #1)
+            if MIN_OBV_CONFIRMATION and action != 'HOLD':
+                if action == 'BUY' and obv_trend <= 0:
+                    return False, f"OBV trend ({obv_trend:.3f}) doesn't confirm BUY signal"
+                elif action == 'SELL' and obv_trend >= 0:
+                    return False, f"OBV trend ({obv_trend:.3f}) doesn't confirm SELL signal"
             
             # Crypto-specific volume thresholds
             if self._is_crypto_symbol(indicators.get('symbol', '')):
                 # Crypto markets can have lower volume thresholds during certain conditions
                 if indicators.get('crypto_regime') == 'crypto_bull':
-                    min_volume_ratio = 0.25  # Lower threshold in bull markets
+                    min_volume_ratio = 0.7  # Slightly lower in bull markets
                 elif indicators.get('on_chain_strength') == 'healthy':
-                    min_volume_ratio = 0.3   # Healthy on-chain can compensate for lower volume
+                    min_volume_ratio = 0.75   # Healthy on-chain can compensate
                 else:
-                    min_volume_ratio = 0.4
-            else:
-                # Traditional thresholds for non-crypto
-                min_volume_ratio = 0.4
+                    min_volume_ratio = 0.8
+                
+                if volume_ratio < min_volume_ratio:
+                    return False, f"Low crypto volume ratio: {volume_ratio:.3f} < {min_volume_ratio} (needs {min_volume_ratio-volume_ratio:.3f} more)"
 
-            if volume_ratio < min_volume_ratio:
-                return False, f"Low volume ratio: {volume_ratio:.3f} < {min_volume_ratio}"
-
-            # Additional crypto-specific volume checks
-            if self._is_crypto_symbol(indicators.get('symbol', '')):
-                # Check exchange flows
+                # Additional crypto-specific volume checks
                 net_flow = indicators.get('exchange_net_flow', 0)
                 if net_flow > 1000000:  # Large inflows to exchanges (potential selling pressure)
                     return False, f"High exchange inflows: {net_flow:,.0f}"
@@ -1730,11 +1824,109 @@ class EnhancedStrategyOrchestrator:
                 if abs(funding_rate) > 0.001:  # Extreme funding rates
                     return False, f"Extreme funding rate: {funding_rate:.4f}"
 
-            return True, f"Volume conditions acceptable (ratio: {volume_ratio:.3f})"
+            return True, f"Volume conditions acceptable (ratio: {volume_ratio:.3f}, OBV: {obv_trend:.3f})"
 
         except Exception as e:
-            self.logger.error(f"Error in crypto volume filter: {e}")
+            self.logger.error(f"Error in enhanced volume filter: {e}")
             return True, "Volume check error - proceeding with caution"
+
+    def _check_momentum_alignment(self, action: str, indicators: Dict) -> Tuple[bool, str]:
+        """Validate momentum regime alignment (Feedback #1)"""
+        try:
+            momentum_regime = indicators.get('momentum_regime', 'neutral')
+            composite_momentum = indicators.get('composite_momentum', 0)
+            ma_alignment_strength = indicators.get('ma_alignment_strength', 0)
+            
+            # MOMENTUM REGIME ALIGNMENT (Feedback #1)
+            bullish_conditions = action == "BUY" and momentum_regime in ["bullish", "strong_bullish"]
+            bearish_conditions = action == "SELL" and momentum_regime in ["bearish", "strong_bearish"]
+            
+            if not (bullish_conditions or bearish_conditions):
+                return False, f"Momentum regime mismatch: {action} vs {momentum_regime}"
+            
+            # MOMENTUM STRENGTH REQUIREMENT (Feedback #1)
+            MIN_MOMENTUM_STRENGTH = 10
+            if abs(composite_momentum) < MIN_MOMENTUM_STRENGTH:
+                return False, f"Weak momentum: |{composite_momentum:.2f}| < {MIN_MOMENTUM_STRENGTH}"
+            
+            # MA ALIGNMENT STRENGTH THRESHOLD (Feedback #1)
+            MIN_MA_ALIGNMENT_STRENGTH = 0.5
+            if ma_alignment_strength < MIN_MA_ALIGNMENT_STRENGTH:
+                return False, f"Weak MA alignment: {ma_alignment_strength:.3f} < {MIN_MA_ALIGNMENT_STRENGTH}"
+            
+            return True, f"Momentum aligned: {momentum_regime}, strength: {composite_momentum:.2f}"
+            
+        except Exception as e:
+            self.logger.error(f"Error checking momentum alignment: {e}")
+            return True, "Momentum check error - proceeding"
+        
+    def _check_rsi_alignment(self, action: str, indicators: Dict) -> Tuple[bool, str]:
+        """Validate RSI trend and momentum alignment (Feedback #1)"""
+        try:
+            rsi_trend = indicators.get('rsi_trend', 0)
+            rsi_momentum = indicators.get('rsi_momentum', 0)
+            rsi_14 = indicators.get('rsi_14', 50)
+            stoch_k = indicators.get('stoch_k', 50)
+            
+            # RSI TREND-MOMENTUM CONSISTENCY (Feedback #1)
+            if action == "BUY" and (rsi_trend < 0 or rsi_momentum < 0):
+                return False, f"RSI misaligned for BUY: trend={rsi_trend}, momentum={rsi_momentum}"
+            if action == "SELL" and (rsi_trend > 0 or rsi_momentum > 0):
+                return False, f"RSI misaligned for SELL: trend={rsi_trend}, momentum={rsi_momentum}"
+            
+            # STRICT OVERBOUGHT/OVERSOLD FILTER (Feedback #2)
+            if action == 'BUY':
+                # Block buys in overbought conditions
+                if rsi_14 > 70 or stoch_k > 80:
+                    return False, f"Overbought conditions: RSI={rsi_14:.1f}, Stoch_K={stoch_k:.1f}"
+            elif action == 'SELL':
+                # Block sells in oversold conditions  
+                if rsi_14 < 30 or stoch_k < 20:
+                    return False, f"Oversold conditions: RSI={rsi_14:.1f}, Stoch_K={stoch_k:.1f}"
+            
+            return True, f"RSI aligned: trend={rsi_trend}, momentum={rsi_momentum:.2f}"
+            
+        except Exception as e:
+            self.logger.error(f"Error checking RSI alignment: {e}")
+            return True, "RSI check error - proceeding"
+            
+    def _check_trend_momentum_alignment(self, action: str, indicators: Dict) -> Tuple[bool, str]:
+        """Enhanced trend-momentum alignment filter (Feedback #2)"""
+        try:
+            composite_momentum = indicators.get('composite_momentum', 0)
+            market_regime = indicators.get('market_regime', 'neutral')
+            trend_strength = indicators.get('trend_strength', 0)
+            
+            # TREND-MOMENTUM ALIGNMENT FILTER (Feedback #2)
+            if action == 'BUY':
+                # For BUY: require positive momentum in bull/neutral regimes
+                if composite_momentum < -10 and market_regime in ['bear_trend', 'high_volatility']:
+                    return False, f"BUY against trend: momentum={composite_momentum:.2f}, regime={market_regime}"
+                
+                # Additional strength requirement for counter-trend buys
+                if market_regime == 'bear_trend' and trend_strength < 0.3:
+                    return False, "Weak trend strength for counter-trend BUY"
+                    
+            elif action == 'SELL':
+                # For SELL: require negative momentum in bear/neutral regimes  
+                if composite_momentum > 10 and market_regime in ['bull_trend', 'high_volatility']:
+                    return False, f"SELL against trend: momentum={composite_momentum:.2f}, regime={market_regime}"
+                
+                # Additional strength requirement for counter-trend sells
+                if market_regime == 'bull_trend' and trend_strength < 0.3:
+                    return False, "Weak trend strength for counter-trend SELL"
+            
+            # STRONG TREND AVOIDANCE (Feedback #2)
+            strong_trend_threshold = 0.6
+            if market_regime in ['bull_trend', 'bear_trend'] and trend_strength > strong_trend_threshold:
+                if (action == 'SELL' and market_regime == 'bull_trend') or (action == 'BUY' and market_regime == 'bear_trend'):
+                    return False, f"Avoid trading against strong trend: {market_regime}, strength={trend_strength:.3f}"
+        
+            return True, f"Trend-momentum aligned: {market_regime}, momentum={composite_momentum:.2f}"
+            
+        except Exception as e:
+            self.logger.error(f"Error checking trend alignment: {e}")
+            return True, "Trend check error - proceeding"
 
     def _calculate_aggressive_composite_score(self, indicators: Dict, signals: Dict, 
                                             ml_result: Dict, mtf_signals: Dict, 
@@ -2021,109 +2213,147 @@ class EnhancedStrategyOrchestrator:
             self.logger.error(f"Error applying crypto regime filters: {e}")
             return decision
 
-    # ENHANCED: Update signal quality assessment with crypto metrics
+    def _calculate_volatility_adjusted_size(self, base_size: float, indicators: Dict) -> float:
+        """Dynamic position sizing based on ATR (Feedback #2)"""
+        try:
+            atr_percent = indicators.get('atr_percent', 2.0)
+            market_regime = indicators.get('market_regime', 'neutral')
+            
+            # ATR-BASED POSITION SIZING ENHANCEMENT (Feedback #2)
+            volatility_adjustment = 1.0
+            
+            if atr_percent > 3.0:  # Extreme volatility
+                volatility_adjustment = 0.5
+            elif atr_percent > 2.0:  # High volatility
+                volatility_adjustment = 0.7
+            elif atr_percent < 0.5:  # Low volatility
+                volatility_adjustment = 1.2
+            elif atr_percent < 1.0:  # Very low volatility
+                volatility_adjustment = 1.1
+            
+            # Additional regime-based adjustments
+            if market_regime == 'high_volatility':
+                volatility_adjustment *= 0.8
+            elif market_regime == 'low_volatility':
+                volatility_adjustment *= 1.1
+                
+            # Crypto-specific volatility adjustments
+            if self._is_crypto_symbol(indicators.get('symbol', '')):
+                crypto_vol_regime = indicators.get('crypto_volatility_regime', 'moderate_volatility')
+                if crypto_vol_regime == 'hyper_volatility':
+                    volatility_adjustment *= 0.6
+                elif crypto_vol_regime == 'high_volatility':
+                    volatility_adjustment *= 0.8
+            
+            adjusted_size = base_size * volatility_adjustment
+            
+            self.logger.info(f"Volatility adjustment: {atr_percent:.2f}% -> {volatility_adjustment:.2f}x, "
+                            f"size: ${base_size:.2f} -> ${adjusted_size:.2f}")
+            
+            return max(adjusted_size, base_size * 0.3)  # Minimum 30% of original size
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating volatility-adjusted size: {e}")
+            return base_size
+
     def _assess_signal_quality_enhanced(self, indicators: Dict, signals: Dict, 
-                                    ml_result: Dict, action: str, composite_score: float) -> Dict:
-        """Enhanced signal quality assessment with crypto-specific factors"""
+                                    ml_result: Dict, action: str, composite_score: float,
+                                    volume_ok: bool = None, volume_reason: str = None) -> Dict:
+        """Enhanced signal quality assessment with pre-computed volume results"""
+
         quality_score = 0
         strengths = []
         weaknesses = []
         filters = []
         
-        # 1. Volume Quality (15 points) - reduced weight for crypto
-        volume_ratio = indicators.get('volume_ratio', 1)
-        volume_ok, volume_reason = self._should_trade_with_volume(indicators)
-        if volume_ok:
-            quality_score += 15
-            strengths.append("Good volume confirmation")
-        else:
-            weaknesses.append(f"Volume issue: {volume_reason}")
-            filters.append("VOLUME_FILTER")
-        
-        # 2. Crypto Regime Alignment (25 points) - NEW
-        crypto_regime = indicators.get('crypto_regime', 'neutral')
-        crypto_confidence = indicators.get('crypto_regime_confidence', 0.5)
-        
-        if crypto_confidence > 0.7:
-            quality_score += 25
-            strengths.append(f"Strong {crypto_regime} crypto regime")
-        elif crypto_confidence > 0.5:
-            quality_score += 15
-            strengths.append(f"Moderate {crypto_regime} crypto regime")
-        else:
-            quality_score += 5
-            weaknesses.append("Unclear crypto regime")
-        
-        # 3. On-Chain Strength (20 points) - NEW
-        on_chain_strength = indicators.get('on_chain_strength', 'neutral')
-        if on_chain_strength == 'healthy':
-            quality_score += 20
-            strengths.append("Healthy on-chain metrics")
-        elif on_chain_strength == 'weak':
-            quality_score += 5
-            weaknesses.append("Weak on-chain metrics")
-        else:
-            quality_score += 10
-        
-        # 4. Signal Consistency (20 points) - reduced weight
-        alignment_ok, alignment_direction, alignment_strength = self._check_signal_alignment({
-            'trend_score': signals.get('trend_strength', 0),
-            'mr_score': signals.get('mr_strength', 0),
-            'breakout_score': signals.get('breakout_strength', 0),
-            'ml_score': ml_result.get('confidence', 0) * 100,
-            'mtf_score': indicators.get('mtf_alignment', 0)
-        })
-        
-        if alignment_ok and alignment_strength > 0.6:
-            quality_score += 20
-            strengths.append(f"Strong signal alignment ({alignment_direction})")
-        elif alignment_ok:
-            quality_score += 15
-            strengths.append(f"Moderate signal alignment ({alignment_direction})")
-        else:
-            quality_score += 5
-            weaknesses.append("Mixed signal alignment")
-            filters.append("ALIGNMENT_FILTER")
-        
-        # 5. Market Sentiment (10 points) - NEW
-        fear_greed = indicators.get('fear_greed_index', 50)
-        if 25 <= fear_greed <= 75:  # Neutral range
-            quality_score += 10
-            strengths.append("Neutral market sentiment")
-        elif fear_greed < 25 and action == 'BUY':  # Extreme fear - good for contrarian buys
-            quality_score += 15
-            strengths.append("Extreme fear - contrarian opportunity")
-        elif fear_greed > 75 and action == 'SELL':  # Extreme greed - good for contrarian sells
-            quality_score += 15
-            strengths.append("Extreme greed - contrarian opportunity")
-        else:
-            quality_score += 5
-            weaknesses.append("Challenging sentiment conditions")
-        
-        # 6. Volatility Context (10 points)
-        atr_percent = indicators.get('atr_percent', 0)
-        if 1.0 < atr_percent < 3.0:
-            quality_score += 10
-            strengths.append("Ideal volatility for trading")
-        elif atr_percent <= 1.0:
-            quality_score += 5
-            weaknesses.append("Low volatility - reduced edge")
-        else:
-            quality_score += 3
-            weaknesses.append("High volatility - increased risk")
-            filters.append("VOLATILITY_FILTER")
-        
-        # Cap at 100
-        quality_score = min(100, quality_score)
-        
-        return {
-            'quality_score': quality_score,
-            'quality_rating': self._get_quality_rating(quality_score),
-            'strengths': strengths,
-            'weaknesses': weaknesses,
-            'active_filters': filters,
-            'execution_confidence': self._calculate_execution_confidence(quality_score, composite_score, action)
-        }
+        try:
+            # 1. Volume Quality (20 points) - Enhanced weight
+            if volume_ok is None:
+                volume_ok, volume_reason = self._should_trade_with_volume(indicators, action)
+            if volume_ok:
+                quality_score += 20
+                strengths.append("Strong volume confirmation")
+            else:
+                weaknesses.append(f"Volume issue: {volume_reason}")
+                filters.append("VOLUME_FILTER")
+            
+            # 2. Momentum Alignment (25 points) - NEW
+            momentum_ok, momentum_reason = self._check_momentum_alignment(action, indicators)
+            if momentum_ok:
+                quality_score += 25
+                strengths.append("Strong momentum alignment")
+            else:
+                weaknesses.append(f"Momentum issue: {momentum_reason}")
+                filters.append("MOMENTUM_FILTER")
+            
+            # 3. RSI Alignment (15 points) - NEW
+            rsi_ok, rsi_reason = self._check_rsi_alignment(action, indicators)
+            if rsi_ok:
+                quality_score += 15
+                strengths.append("RSI conditions favorable")
+            else:
+                weaknesses.append(f"RSI issue: {rsi_reason}")
+                filters.append("RSI_FILTER")
+            
+            # 4. Trend Alignment (20 points) - Enhanced
+            trend_ok, trend_reason = self._check_trend_momentum_alignment(action, indicators)
+            if trend_ok:
+                quality_score += 20
+                strengths.append("Favorable trend alignment")
+            else:
+                weaknesses.append(f"Trend issue: {trend_reason}")
+                filters.append("TREND_FILTER")
+            
+            # 5. MA Alignment Strength (10 points) - Enhanced
+            ma_alignment_strength = indicators.get('ma_alignment_strength', 0)
+            if ma_alignment_strength >= 0.5:
+                quality_score += 10
+                strengths.append(f"Strong MA alignment ({ma_alignment_strength:.3f})")
+            else:
+                quality_score += max(0, int(ma_alignment_strength * 20))  # Partial credit
+                weaknesses.append(f"Weak MA alignment ({ma_alignment_strength:.3f})")
+            
+            # 6. Signal Consistency (10 points) - Reduced weight due to new validations
+            alignment_ok, alignment_direction, alignment_strength = self._check_signal_alignment({
+                'trend_score': signals.get('trend_strength', 0),
+                'mr_score': signals.get('mr_strength', 0),
+                'breakout_score': signals.get('breakout_strength', 0),
+                'ml_score': ml_result.get('confidence', 0) * 100,
+                'mtf_score': indicators.get('mtf_alignment', 0)
+            })
+            
+            if alignment_ok and alignment_strength > 0.6:
+                quality_score += 10
+                strengths.append(f"Strong signal alignment ({alignment_direction})")
+            elif alignment_ok:
+                quality_score += 5
+                strengths.append(f"Moderate signal alignment ({alignment_direction})")
+            else:
+                weaknesses.append("Mixed signal alignment")
+                filters.append("ALIGNMENT_FILTER")
+            
+            # Cap at 100
+            quality_score = min(100, quality_score)
+            
+            return {
+                'quality_score': quality_score,
+                'quality_rating': self._get_quality_rating(quality_score),
+                'strengths': strengths,
+                'weaknesses': weaknesses,
+                'active_filters': filters,
+                'execution_confidence': self._calculate_execution_confidence(quality_score, composite_score, action)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error in enhanced signal quality assessment: {e}")
+            return {
+                'quality_score': 0,
+                'quality_rating': 'POOR',
+                'strengths': [],
+                'weaknesses': ['Error assessing signal quality'],
+                'active_filters': ['ERROR'],
+                'execution_confidence': 0
+            }
 
     def _calculate_execution_confidence(self, quality_score: float, composite_score: float, action: str) -> float:
         """Calculate execution confidence based on quality and score"""
@@ -2433,32 +2663,26 @@ class EnhancedStrategyOrchestrator:
 
             buy_threshold = thresholds['buy']
             sell_threshold = thresholds['sell']
-            strong_threshold = thresholds['strong']
 
             if aggressiveness == "conservative":
                 confidence_boost_factor = 0.5
-                strong_signal_boost = 1.2
             elif aggressiveness == "moderate":
                 confidence_boost_factor = 0.6
-                strong_signal_boost = 1.3
             elif aggressiveness == "aggressive":
                 confidence_boost_factor = 0.7
-                strong_signal_boost = 1.4
             elif aggressiveness == "high":
                 confidence_boost_factor = 0.8
-                strong_signal_boost = 1.5
             else:
                 confidence_boost_factor = 0.5
-                strong_signal_boost = 1.2
 
             ml_confidence = ml_result.get('confidence', 0)
 
             confidence_boost = min(ml_confidence * 25 * confidence_boost_factor, 20)
 
-            if composite_score >= self.buy_threshold:
+            if composite_score >= buy_threshold:
                 action = 'BUY'
                 base_confidence = min(composite_score, 70)
-            elif composite_score <= self.sell_threshold:
+            elif composite_score <= sell_threshold:
                 action = 'SELL' 
                 base_confidence = min(abs(composite_score), 70)
             else:

@@ -1205,26 +1205,35 @@ class TradingDatabase:
             self.logger.error(f"Failed to get system events: {e}", exc_info=True)
             return pd.DataFrame()
 
-    def get_trading_statistics(self, days: int = 30) -> Dict[str, Any]:
+    def get_trading_statistics(self, days: int = 30, all_time: bool = False) -> Dict[str, Any]:
         try:
-            trades_df = self.get_historical_trades(days=days)
+            if all_time:
+                # Get all trades regardless of date
+                trades_df = self.get_historical_trades(days=365*10)  # Large number to get all trades
+            else:
+                trades_df = self.get_historical_trades(days=days)
 
             if trades_df.empty or 'pnl_percent' not in trades_df.columns:
-                 return {'message': f'No trades with PnL found for {days} days'}
+                return {'message': f'No trades with PnL found for {"all time" if all_time else f"{days} days"}'}
 
+            # Rest of the method remains the same...
             valid_trades = trades_df.dropna(subset=['pnl_percent'])
             if valid_trades.empty:
-                return {'message': f'No closed trades with PnL found for {days} days'}
+                return {'message': f'No closed trades with PnL found for {"all time" if all_time else f"{days} days"}'}
 
             stats = {}
             stats['total_trades'] = len(valid_trades)
-            stats['successful_executions'] = int(valid_trades['success'].sum())
+            stats['successful_executions'] = int(valid_trades['success'].sum()) if 'success' in valid_trades.columns else 0
             stats['avg_pnl_percent'] = valid_trades['pnl_percent'].mean()
             stats['avg_confidence'] = valid_trades['confidence'].mean()
             stats['avg_risk_reward'] = valid_trades['risk_reward_ratio'].mean()
-            stats['winning_trades'] = len(valid_trades[valid_trades['pnl_percent'] > 0])
-            stats['losing_trades'] = len(valid_trades[valid_trades['pnl_percent'] < 0])
-            stats['win_rate'] = (stats['winning_trades'] / stats['total_trades'] * 100) if stats['total_trades'] > 0 else 0
+            
+            # Fix win rate calculation
+            winning_trades = len(valid_trades[valid_trades['pnl_percent'] > 0])
+            losing_trades = len(valid_trades[valid_trades['pnl_percent'] < 0])
+            stats['winning_trades'] = winning_trades
+            stats['losing_trades'] = losing_trades
+            stats['win_rate'] = (winning_trades / stats['total_trades'] * 100) if stats['total_trades'] > 0 else 0
 
             best_trade_row = valid_trades.loc[valid_trades['pnl_percent'].idxmax()] if stats['total_trades'] > 0 else None
             stats['best_trade'] = best_trade_row.to_dict() if best_trade_row is not None else None
@@ -1253,6 +1262,58 @@ class TradingDatabase:
         except Exception as e:
             self.logger.error(f"Failed to get trading statistics: {e}", exc_info=True)
             return {}
+
+    def get_period_pnl(self, days: int = 7) -> Dict[str, float]:
+        """Get total PnL for a specific period - FIXED"""
+        try:
+            start_date_str = (datetime.now() - timedelta(days=days)).isoformat()
+            
+            query = """
+                SELECT 
+                    SUM(pnl_usdt) as total_pnl_usdt,
+                    AVG(pnl_percent) as avg_pnl_percent,
+                    COUNT(*) as total_trades
+                FROM trades 
+                WHERE timestamp >= ? AND pnl_usdt IS NOT NULL AND success = 'True'
+            """
+            self.cursor.execute(query, (start_date_str,))
+            row = self.cursor.fetchone()
+            
+            # Ensure consistency between USD and percentage
+            total_pnl_usdt = float(row['total_pnl_usdt'] or 0)
+            avg_pnl_percent = float(row['avg_pnl_percent'] or 0)
+            
+            return {
+                'total_pnl_usdt': total_pnl_usdt,
+                'total_pnl_percent': avg_pnl_percent,  # Use average instead of sum for consistency
+                'total_trades': int(row['total_trades'] or 0)
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting period PnL: {e}")
+            return {'total_pnl_usdt': 0, 'total_pnl_percent': 0, 'total_trades': 0}
+
+    def get_all_time_pnl(self) -> Dict[str, float]:
+        """Get total PnL for all time"""
+        try:
+            query = """
+                SELECT 
+                    SUM(pnl_usdt) as total_pnl_usdt,
+                    SUM(pnl_percent) as total_pnl_percent,
+                    COUNT(*) as total_trades
+                FROM trades 
+                WHERE pnl_usdt IS NOT NULL AND success = 'True'
+            """
+            self.cursor.execute(query)
+            row = self.cursor.fetchone()
+            
+            return {
+                'total_pnl_usdt': float(row['total_pnl_usdt'] or 0),
+                'total_pnl_percent': float(row['total_pnl_percent'] or 0),
+                'total_trades': int(row['total_trades'] or 0)
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting all-time PnL: {e}")
+            return {'total_pnl_usdt': 0, 'total_pnl_percent': 0, 'total_trades': 0}
 
     def get_prediction_quality_stats(self, symbol: str = None, days: int = 7) -> Dict[str, Any]:
          try:
